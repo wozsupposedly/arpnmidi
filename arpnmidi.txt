@@ -2,21 +2,21 @@
   arpnmidi.txt
   RP2040 Zero MIDI router / arpeggiator / processor / multitool
 
-  Pin plan for RP2040 Zero, using the GPIO numbers as marked on the board:
+  Pin plan using the board labels you can see on this RP2040 Zero:
 
-  GP0   DIN MIDI IN    (from Pro Micro TX through resistor divider)
-  GP1   DIN MIDI OUT   (to DIN MIDI out circuit)
-  GP4   I2C SDA        (SSD1306 + VL53L0X shared bus)
-  GP5   I2C SCL        (SSD1306 + VL53L0X shared bus)
-  GP8   Encoder A
-  GP9   Encoder B
-  GP10  Encoder push switch
-  GP12  Foot pedal 1   (active low, internal pullup)
-  GP13  Foot pedal 2   (active low, internal pullup)
-  GP16  USB host D+
-  GP17  USB host D-
+  0   DIN MIDI IN
+  1   DIN MIDI OUT
+  2   I2C SDA for SSD1306 + VL53L0X
+  3   I2C SCL for SSD1306 + VL53L0X
+  6   Encoder A
+  7   Encoder B
+  8   Encoder push
+  9   Foot pedal 1
+  10  Foot pedal 2
+  14  USB host D+
+  15  USB host D-
 
-  GP11 intentionally avoided.
+  11 intentionally avoided.
 
   Notes:
   - USB host is implemented for RP2040 PIO-USB on GP16/GP17.
@@ -53,15 +53,15 @@
 
 constexpr uint8_t PIN_DIN_MIDI_RX = 0;
 constexpr uint8_t PIN_DIN_MIDI_TX = 1;
-constexpr uint8_t PIN_I2C_SDA = 4;
-constexpr uint8_t PIN_I2C_SCL = 5;
-constexpr uint8_t PIN_ENC_A = 8;
-constexpr uint8_t PIN_ENC_B = 9;
-constexpr uint8_t PIN_ENC_SW = 10;
-constexpr uint8_t PIN_FOOT_1 = 12;
-constexpr uint8_t PIN_FOOT_2 = 13;
-constexpr uint8_t PIN_USB_HOST_DP = 16;
-constexpr uint8_t PIN_USB_HOST_DM = 17;
+constexpr uint8_t PIN_I2C_SDA = 2;
+constexpr uint8_t PIN_I2C_SCL = 3;
+constexpr uint8_t PIN_ENC_A = 6;
+constexpr uint8_t PIN_ENC_B = 7;
+constexpr uint8_t PIN_ENC_SW = 8;
+constexpr uint8_t PIN_FOOT_1 = 9;
+constexpr uint8_t PIN_FOOT_2 = 10;
+constexpr uint8_t PIN_USB_HOST_DP = 14;
+constexpr uint8_t PIN_USB_HOST_DM = 15;
 constexpr uint8_t PIN_USB_HOST_VBUS_EN = 255;
 
 constexpr uint8_t OLED_ADDR = 0x3C;

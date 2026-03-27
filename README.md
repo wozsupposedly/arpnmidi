@@ -81,108 +81,18 @@ distance sensor modes
 
 
 
-
-
--=-=-=-=-=-=-=-=-=
-
-
-
-
-
-future notes maybe for midi control
-Knob 1: Divisions (with triplets)
-Make the knob pick a clock division per arp step, including triplets, quantized across the CC range. Example list (coarse but playable):
-1. 1/1
-2. 1/2
-3. 1/2T (triplet half)
-4. 1/4
-5. 1/4T
-6. 1/8
-7. 1/8T
-8. 1/16
-9. 1/16T
-10. 1/32
-11. 1/32T
-12. 1/64
-
-Knob 2: 0=same as knob 1, >0=smooth increase of frequency up to audio regions
-Implementation idea: map the knob’s 0–127 to indices 1–12 and internally treat that as the note value for each arp step (all steps share the same division choice at any instant).
-
-Knob 3: Note length (gate list)
-Have this knob define gate time as a percentage of the chosen division; you can treat it as a discrete list for musical feel:
-1. 10% (very short stabs)
-2. 20%
-3. 30%
-4. 40%
-5. 50%
-6. 60%
-7. 70%
-8. 80%
-9. 90%
-10. 100% (legato within that division)
-11. 120% (overlap)
-Again, quantize knob position to an index and use that percentage for all steps at that moment.
-Knob 4: Arp patterns (per‑step note selection)
-Here “pattern” = which note (or chord behavior) is played on each of the 16 steps, expressed as an index into the currently held notes (N0 = lowest, N1 = next, etc.). Example pattern list:
-1. Up 1‑oct range: [N0, N1, N2, N3, N0, N1, N2, N3, …]
-2. Down: [N3, N2, N1, N0, …]
-3. Up‑down 1 (no repeat ends): [0,1,2,3,2,1,0,1,2,3,2,1,…]
-4. Up‑down 2 (repeat ends): [0,1,2,3,3,2,1,0,0,1,2,3,…]
-5. Random single note: each step picks random of [0..max]
-6. Trigger chord (Korg “Trigger” behavior): [ALL, ALL, ALL, …] – play all held notes each step.
-7. 16‑step “rhythm” style pattern (use rests): [0, REST, 0, REST, 1, REST, 1, REST, 0, REST, 2, REST, 0, REST, 3, REST]
-8. 3‑note ostinato: [0, 1, 2, 0, 1, 2, …]
-9. Octave walk: [0@oct0, 0@oct1, 0@oct2, 0@oct3, 1@oct0, 1@oct1, …]
-10. Fifth‑based: [0, 0+7, 1, 1+7, 2, 2+7, …]
-11. “Bass then chord”: [0, ALL, 0, ALL, 1, ALL, 1, ALL, …]
-12. “Chord then run”: [ALL, 0,1,2,3, ALL, 3,2,1,0, …]
-Internally, each pattern is a 16‑element table; each element is either a note index (possibly with an octave offset) or a special symbol like REST or ALL.
-
-Knob 5: up, down, up‑down 1, up‑down 2, trigger, random
-
-Knob 6: Velocity ramp, slow/fast and direction
-You described: “0 = off, first half increases the slowness of a velocity ramp up.” A good interpretation:
-* 0–10: no ramp, use fixed velocity or input velocity.
-* 11–63: ramp up (quiet → loud) over 16 steps; lower knob = slower ramp (takes many bars), higher = faster ramp.
-* 64–117: ramp down (loud → quiet) with same “slowness” idea mirrored.
-* 118–127: random / humanize range.
-To make this more explicit as lists:
-* Define a base ramp profile for 16 steps, e.g. [20, 25, 30, …, 100].
-* For ramp‑up region (11–63), map knob to a “cycle length” in steps, e.g.
-    * near 11 → ramp cycle = 64 steps (super slow),
-    * middle → 32 steps,
-    * near 63 → 16 steps (one full ramp per pattern).
-* For ramp‑down, same but descending velocities.
-* For random region, each step velocity = base value ± random range that grows with knob value.
-So each step’s velocity is computed from:
-* pattern step index (0–15),
-* current ramp phase (which advances each step based on “slowness”),
-* direction (up/down) chosen by which half of the knob you’re in.
-
-knob 7: arp out channel
-knob 8: passthrough out channel
-
-* only full velocity? orVelocity shaping
-    * fixed velocity, follow key velocity, ramp up/down, randomize.
-
-
-
-
-
-
-
 • Use these RP2040 Zero board-marked pins:
 
-  - GP0 DIN MIDI IN from the Pro Micro divider
-  - GP1 DIN MIDI OUT
-  - GP4 I2C SDA for SSD1306 and VL53L0X
-  - GP5 I2C SCL for SSD1306 and VL53L0X
-  - GP8 rotary encoder A
-  - GP9 rotary encoder B
-  - GP10 rotary encoder push switch
-  - GP12 foot pedal 1, active low with internal pullup
-  - GP13 foot pedal 2, active low with internal pullup
-  - GP16 USB host D+
-  - GP17 USB host D-
+  - 0 DIN MIDI IN
+  - 1 DIN MIDI OUT
+  - 2 I2C SDA
+  - 3 I2C SCL
+  - 6 encoder A
+  - 7 encoder B
+  - 8 encoder push
+  - 9 foot pedal 1
+  - 10 foot pedal 2
+  - 14 USB host D+
+  - 15 USB host D-
 
   GP11 is avoided.
