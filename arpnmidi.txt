@@ -19,14 +19,15 @@
   GP11 intentionally avoided.
 
   Notes:
-  - This sketch is designed so DIN MIDI works by itself.
-  - USB host MIDI is left as a compile-time integration hook because this repo
-    does not contain a working RP2040 USB-host MIDI stack example to bind to.
+  - USB host is implemented for RP2040 PIO-USB on GP16/GP17.
+  - Build this with the Arduino-Pico core, Tools->USB Stack = Adafruit TinyUSB,
+    and CPU speed = 120 MHz or 240 MHz.
   - The display is only redrawn when something visible changes.
   - Settings persist in flash-backed EEPROM with 16 preset slots.
 */
 
 #include <Arduino.h>
+#include <SerialUART.h>
 #include <Wire.h>
 #include <EEPROM.h>
 #include <MIDI.h>
@@ -35,7 +36,13 @@
 #include <VL53L0X.h>
 
 #ifndef ARPNMIDI_ENABLE_USB_HOST
-#define ARPNMIDI_ENABLE_USB_HOST 0
+#define ARPNMIDI_ENABLE_USB_HOST 1
+#endif
+
+#if ARPNMIDI_ENABLE_USB_HOST
+#include <Adafruit_TinyUSB.h>
+#include "pio_usb_configuration.h"
+#include "pio_usb.h"
 #endif
 
 constexpr uint8_t PIN_DIN_MIDI_RX = 0;
@@ -49,6 +56,7 @@ constexpr uint8_t PIN_FOOT_1 = 12;
 constexpr uint8_t PIN_FOOT_2 = 13;
 constexpr uint8_t PIN_USB_HOST_DP = 16;
 constexpr uint8_t PIN_USB_HOST_DM = 17;
+constexpr uint8_t PIN_USB_HOST_VBUS_EN = 255;
 
 constexpr uint8_t OLED_ADDR = 0x3C;
 constexpr uint8_t SCREEN_W = 128;
@@ -70,13 +78,17 @@ constexpr uint32_t PEDAL_PULSE_MS = 35UL;
 constexpr uint8_t MAX_HELD_NOTES = 32;
 constexpr uint8_t MAX_ARP_OUTPUT_NOTES = 8;
 constexpr uint8_t PRESET_COUNT = 16;
+constexpr uint8_t MAX_USB_MIDI_DEVICES = 8;
 constexpr uint16_t EEPROM_MAGIC = 0x4D41;
 constexpr size_t EEPROM_BYTES = 2048;
 
-HardwareSerial &DinSerial = Serial1;
+SerialUART &DinSerial = Serial1;
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, DinMIDI);
 Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
 VL53L0X tof;
+#if ARPNMIDI_ENABLE_USB_HOST
+Adafruit_USBH_Host USBHost;
+#endif
 
 enum MenuMode : uint8_t {
   MENU_SELECT = 0,
@@ -251,8 +263,24 @@ struct StorageImage {
 struct ClockTracker {
   uint32_t lastClockMicros = 0;
   uint32_t lastDinClockMs = 0;
+  uint32_t lastUsbClockMs = 0;
   uint8_t pulseCount = 0;
   float bpm = 120.0f;
+};
+
+struct UsbMidiDevice {
+  bool mounted = false;
+  uint8_t idx = 0xFF;
+  uint8_t daddr = 0;
+  uint8_t rxCableCount = 0;
+  uint8_t txCableCount = 0;
+};
+
+struct UsbMidiParser {
+  uint8_t runningStatus = 0;
+  uint8_t data[2] = {0, 0};
+  uint8_t needed = 0;
+  uint8_t have = 0;
 };
 
 struct PedalPulse {
@@ -315,6 +343,8 @@ uint8_t arpPatternStep = 0;
 bool arpPendulumUp = true;
 bool arpHadKeys = false;
 bool screenSaverSeeded = false;
+UsbMidiDevice usbMidiDevices[MAX_USB_MIDI_DEVICES];
+UsbMidiParser usbMidiParsers[MAX_USB_MIDI_DEVICES];
 
 const char *const kSettingNames[SETTING_COUNT] = {
   "1 BPM", "2 ARP MODE", "3 DIVISION", "4 VELOCITY", "5 LENGTH", "6 PATTERN",
@@ -430,7 +460,36 @@ uint16_t currentBpm() {
   if ((millis() - clockTracker.lastDinClockMs) < 2000UL) {
     return constrain(static_cast<int>(clockTracker.bpm + 0.5f), 20, 300);
   }
+  if ((millis() - clockTracker.lastUsbClockMs) < 2000UL) {
+    return constrain(static_cast<int>(clockTracker.bpm + 0.5f), 20, 300);
+  }
   return constrain(static_cast<int>(settings.manualBpm), 20, 300);
+}
+
+uint8_t midiMessageDataLength(uint8_t status) {
+  if (status >= 0xF8) return 0;
+  switch (status & 0xF0) {
+    case 0x80:
+    case 0x90:
+    case 0xA0:
+    case 0xB0:
+    case 0xE0:
+      return 2;
+    case 0xC0:
+    case 0xD0:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+void sendDinRaw1(uint8_t status) {
+  DinSerial.write(status);
+}
+
+void sendDinRaw2(uint8_t status, uint8_t data1) {
+  DinSerial.write(status);
+  DinSerial.write(data1);
 }
 
 uint32_t divisionStepMs() {
@@ -483,13 +542,34 @@ void sendDinPitchBend(uint8_t channel1, int bend) {
   DinMIDI.sendPitchBend(bend, channel1);
 }
 
+#if ARPNMIDI_ENABLE_USB_HOST
+uint8_t usbPortFromIdx(uint8_t idx) {
+  return idx + 1;
+}
+
+UsbMidiDevice *findUsbMidiDevice(uint8_t idx) {
+  for (uint8_t i = 0; i < MAX_USB_MIDI_DEVICES; ++i) {
+    if (usbMidiDevices[i].mounted && usbMidiDevices[i].idx == idx) return &usbMidiDevices[i];
+  }
+  return nullptr;
+}
+#endif
+
 void sendMidiToUsbHosts(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2) {
+#if ARPNMIDI_ENABLE_USB_HOST
+  uint8_t msg[3] = {status, data1, data2};
+  const uint8_t len = 1 + midiMessageDataLength(status);
+  for (uint8_t i = 0; i < MAX_USB_MIDI_DEVICES; ++i) {
+    UsbMidiDevice &dev = usbMidiDevices[i];
+    if (!dev.mounted || dev.txCableCount == 0) continue;
+    if (sourcePort != 255 && sourcePort == usbPortFromIdx(dev.idx)) continue;
+    tuh_midi_stream_write(dev.idx, 0, msg, len);
+  }
+#else
   (void)sourcePort;
   (void)status;
   (void)data1;
   (void)data2;
-#if ARPNMIDI_ENABLE_USB_HOST
-  // Integrate your preferred RP2040 PIO-USB + TinyUSB host MIDI send path here.
 #endif
 }
 
@@ -503,9 +583,18 @@ void sendFanout(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2
     sendDinNoteOff(ch1, data1, data2);
   } else if (type == 0xB0) {
     sendDinCc(ch1, data1, data2);
+  } else if (type == 0xC0) {
+    DinMIDI.sendProgramChange(data1, ch1);
+  } else if (type == 0xD0) {
+    DinMIDI.sendAfterTouch(data1, ch1);
+  } else if (type == 0xA0) {
+    sendDinRaw2(status, data1);
+    DinSerial.write(data2);
   } else if (type == 0xE0) {
     int bend = static_cast<int>(data1) | (static_cast<int>(data2) << 7);
     sendDinPitchBend(ch1, bend - 8192);
+  } else if (status >= 0xF8) {
+    sendDinRaw1(status);
   }
   sendMidiToUsbHosts(sourcePort, status, data1, data2);
 }
@@ -516,8 +605,8 @@ void sendAllNoteOffChannel(uint8_t ch1) {
     sendDinNoteOff(ch1, note, 0);
     sendMidiToUsbHosts(255, 0x80 | ((ch1 - 1) & 0x0F), note, 0);
   }
-  sendDinCc(ch1, 123, 0);
-  sendDinCc(ch1, 120, 0);
+  sendFanout(255, 0xB0 | ((ch1 - 1) & 0x0F), 123, 0);
+  sendFanout(255, 0xB0 | ((ch1 - 1) & 0x0F), 120, 0);
 }
 
 void panicAll() {
@@ -655,6 +744,7 @@ void handleClockByte(bool fromDin) {
   const uint32_t nowMicros = micros();
   const uint32_t nowMs = millis();
   if (fromDin) clockTracker.lastDinClockMs = nowMs;
+  else clockTracker.lastUsbClockMs = nowMs;
   if (clockTracker.lastClockMicros != 0) {
     clockTracker.pulseCount++;
     if (clockTracker.pulseCount >= 24) {
@@ -1015,6 +1105,150 @@ void handleDinPb(byte channel, int bend) {
 void handleDinClock() {
   handleClockByte(true);
 }
+
+#if ARPNMIDI_ENABLE_USB_HOST
+void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2) {
+  const uint8_t type = status & 0xF0;
+  const uint8_t channel = (status & 0x0F) + 1;
+  if (type == 0x90) {
+    onInputNote(sourcePort, channel, data1, data2, data2 > 0);
+  } else if (type == 0x80) {
+    onInputNote(sourcePort, channel, data1, 0, false);
+  } else if (type == 0xB0) {
+    handleDinCc(channel, data1, data2);
+  } else if (type == 0xE0) {
+    handleDinPb(channel, static_cast<int>(data1 | (data2 << 7)) - 8192);
+  } else if (type == 0xC0 || type == 0xD0 || type == 0xA0) {
+    if (channel != settings.inputChannel) {
+      sendFanout(sourcePort, status, data1, data2);
+    } else {
+      const uint8_t outCh = effectiveThruChannel();
+      if (channelEnabled(outCh)) {
+        sendFanout(sourcePort, (status & 0xF0) | ((outCh - 1) & 0x0F), data1, data2);
+      }
+    }
+  }
+}
+
+void processUsbMidiByte(uint8_t sourcePort, UsbMidiParser &parser, uint8_t b) {
+  if (b >= 0xF8) {
+    if (b == 0xF8) handleClockByte(false);
+    sendFanout(sourcePort, b, 0, 0);
+    return;
+  }
+
+  if (b & 0x80) {
+    parser.runningStatus = b;
+    parser.needed = midiMessageDataLength(b);
+    parser.have = 0;
+    if (parser.needed == 0) {
+      parser.runningStatus = 0;
+    }
+    return;
+  }
+
+  if (parser.runningStatus == 0 || parser.needed == 0) return;
+  parser.data[parser.have++] = b;
+  if (parser.have < parser.needed) return;
+
+  const uint8_t status = parser.runningStatus;
+  const uint8_t data1 = parser.data[0];
+  const uint8_t data2 = (parser.needed > 1) ? parser.data[1] : 0;
+  routeIncomingChannelMessage(sourcePort, status, data1, data2);
+  parser.have = 0;
+}
+
+void pollUsbMidiInput(uint8_t idx) {
+  if (idx >= MAX_USB_MIDI_DEVICES) return;
+  UsbMidiParser &parser = usbMidiParsers[idx];
+  uint8_t cable = 0;
+  uint8_t buffer[48];
+  while (true) {
+    const uint32_t n = tuh_midi_stream_read(idx, &cable, buffer, sizeof(buffer));
+    if (n == 0) break;
+    const uint8_t sourcePort = usbPortFromIdx(idx);
+    for (uint32_t i = 0; i < n; ++i) {
+      processUsbMidiByte(sourcePort, parser, buffer[i]);
+    }
+  }
+}
+
+void flushUsbMidiOutput() {
+  for (uint8_t i = 0; i < MAX_USB_MIDI_DEVICES; ++i) {
+    if (usbMidiDevices[i].mounted && usbMidiDevices[i].txCableCount > 0) {
+      tuh_midi_write_flush(usbMidiDevices[i].idx);
+    }
+  }
+}
+
+void setupUsbHost() {
+  const uint32_t cpu_hz = clock_get_hz(clk_sys);
+  if (cpu_hz != 120000000UL && cpu_hz != 240000000UL) {
+    return;
+  }
+
+  pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
+  pio_cfg.pin_dp = PIN_USB_HOST_DP;
+  USBHost.configure_pio_usb(1, &pio_cfg);
+
+  if (PIN_USB_HOST_VBUS_EN != 255) {
+    pinMode(PIN_USB_HOST_VBUS_EN, OUTPUT);
+    digitalWrite(PIN_USB_HOST_VBUS_EN, HIGH);
+  }
+}
+
+void taskUsbHost() {
+  USBHost.task();
+  flushUsbMidiOutput();
+}
+
+void setup1() {
+  setupUsbHost();
+  if (clock_get_hz(clk_sys) == 120000000UL || clock_get_hz(clk_sys) == 240000000UL) {
+    USBHost.begin(1);
+  }
+}
+
+void loop1() {
+  taskUsbHost();
+}
+
+void tuh_midi_mount_cb(uint8_t idx, const tuh_midi_mount_cb_t *mount_cb_data) {
+  if (idx >= MAX_USB_MIDI_DEVICES) return;
+  for (uint8_t i = 0; i < MAX_USB_MIDI_DEVICES; ++i) {
+    if (!usbMidiDevices[i].mounted) {
+      usbMidiDevices[i].mounted = true;
+      usbMidiDevices[i].idx = idx;
+      usbMidiDevices[i].daddr = mount_cb_data->daddr;
+      usbMidiDevices[i].rxCableCount = mount_cb_data->rx_cable_count;
+      usbMidiDevices[i].txCableCount = mount_cb_data->tx_cable_count;
+      usbMidiParsers[idx] = UsbMidiParser{};
+      break;
+    }
+  }
+}
+
+void tuh_midi_umount_cb(uint8_t idx) {
+  if (idx >= MAX_USB_MIDI_DEVICES) return;
+  for (uint8_t i = 0; i < MAX_USB_MIDI_DEVICES; ++i) {
+    if (usbMidiDevices[i].mounted && usbMidiDevices[i].idx == idx) {
+      usbMidiDevices[i] = UsbMidiDevice{};
+      usbMidiParsers[idx] = UsbMidiParser{};
+      break;
+    }
+  }
+}
+
+void tuh_midi_rx_cb(uint8_t idx, uint32_t num_packets) {
+  (void)num_packets;
+  pollUsbMidiInput(idx);
+}
+
+void tuh_midi_tx_cb(uint8_t idx, uint32_t num_bytes) {
+  (void)idx;
+  (void)num_bytes;
+}
+#endif
 
 int8_t arpModeNextIndex() {
   if (heldCount == 0) return -1;
