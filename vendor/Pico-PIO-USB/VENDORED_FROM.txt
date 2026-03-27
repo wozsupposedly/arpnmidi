@@ -1,0 +1,14 @@
+Vendored dependency: Pico-PIO-USB
+
+Upstream repository:
+https://github.com/sekigon-gonnoc/Pico-PIO-USB
+
+Vendored from tag:
+0.7.1
+
+Purpose in this project:
+- RP2040 PIO-based USB host support used by arpnmidi.txt for USB MIDI hosting.
+
+Attribution:
+- Original authors and license are preserved in this vendored directory.
+- See LICENSE in this folder for the upstream license text.

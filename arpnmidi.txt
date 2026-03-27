@@ -22,6 +22,12 @@
   - USB host is implemented for RP2040 PIO-USB on GP16/GP17.
   - Build this with the Arduino-Pico core, Tools->USB Stack = Adafruit TinyUSB,
     and CPU speed = 120 MHz or 240 MHz.
+  - Install Pico-PIO-USB manually since it is not in Arduino Library Manager:
+    https://github.com/sekigon-gonnoc/Pico-PIO-USB
+    A vendored copy of tag 0.7.1 is included in this repo at vendor/Pico-PIO-USB.
+  - Enable TinyUSB MIDI host in the RP2040 core by adding
+    #define CFG_TUH_MIDI (CFG_TUH_DEVICE_MAX)
+    to tusb_config_rp2040.h in the installed Arduino-Pico core.
   - The display is only redrawn when something visible changes.
   - Settings persist in flash-backed EEPROM with 16 preset slots.
 */
