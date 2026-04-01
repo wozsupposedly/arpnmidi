@@ -1,0 +1,165 @@
+/*
+  oled_vl53_test.txt
+  Minimal RP2040 Zero test for:
+  - SSD1306 128x64 I2C OLED
+  - VL53L0X distance sensor
+
+  What it does:
+  - Tries a few common RP2040 Zero I2C pin pairs automatically
+  - Looks for OLED at 0x3C and VL53L0X at 0x29
+  - Shows live distance in mm on the OLED
+
+  If your display still stays blank:
+  - verify 3V3 and GND
+  - verify SDA/SCL are not swapped
+  - verify OLED address is 0x3C
+  - verify VL53L0X address is 0x29
+*/
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <VL53L0X.h>
+
+constexpr uint8_t OLED_ADDR = 0x3C;
+constexpr uint8_t VL53_ADDR = 0x29;
+constexpr uint8_t SCREEN_W = 128;
+constexpr uint8_t SCREEN_H = 64;
+constexpr uint32_t SENSOR_POLL_MS = 50;
+
+struct I2cPair {
+  uint8_t sda;
+  uint8_t scl;
+};
+
+const I2cPair kPairs[] = {
+  {2, 3},
+  {4, 5},
+  {6, 7},
+  {8, 9},
+  {14, 15},
+  {26, 27}
+};
+
+Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire1, -1);
+VL53L0X tof;
+
+bool oledOk = false;
+bool sensorOk = false;
+bool busFound = false;
+uint8_t activeSda = 255;
+uint8_t activeScl = 255;
+uint16_t lastRangeMm = 0;
+uint32_t lastPollMs = 0;
+
+bool probeAddress(uint8_t addr) {
+  Wire1.beginTransmission(addr);
+  return Wire1.endTransmission() == 0;
+}
+
+void drawStatus(const char *line1, const char *line2 = nullptr, const char *line3 = nullptr) {
+  if (!oledOk) return;
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println(F("OLED + VL53L0X TEST"));
+  display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+  display.setCursor(0, 16);
+  display.println(line1);
+  if (line2) display.println(line2);
+  if (line3) display.println(line3);
+  display.display();
+}
+
+bool tryPair(uint8_t sda, uint8_t scl) {
+  Wire1.end();
+  Wire1.setSDA(sda);
+  Wire1.setSCL(scl);
+  Wire1.begin();
+  Wire1.setClock(400000);
+  delay(20);
+
+  const bool hasOled = probeAddress(OLED_ADDR);
+  const bool hasVl53 = probeAddress(VL53_ADDR);
+  if (!hasOled || !hasVl53) return false;
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) return false;
+  oledOk = true;
+
+  tof.setBus(&Wire1);
+  if (!tof.init()) {
+    drawStatus("VL53L0X init failed", "on detected I2C bus");
+    return false;
+  }
+
+  tof.setTimeout(100);
+  tof.startContinuous();
+
+  sensorOk = true;
+  busFound = true;
+  activeSda = sda;
+  activeScl = scl;
+  return true;
+}
+
+void drawDistance(uint16_t mm) {
+  if (!oledOk) return;
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.print(F("SDA "));
+  display.print(activeSda);
+  display.print(F("  SCL "));
+  display.print(activeScl);
+
+  display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+
+  display.setTextSize(2);
+  display.setCursor(0, 18);
+  display.println(F("DISTANCE"));
+
+  display.setTextSize(3);
+  display.setCursor(0, 40);
+  display.print(mm);
+
+  display.setTextSize(2);
+  display.print(F("mm"));
+
+  display.display();
+}
+
+void setup() {
+  for (size_t i = 0; i < (sizeof(kPairs) / sizeof(kPairs[0])); ++i) {
+    if (tryPair(kPairs[i].sda, kPairs[i].scl)) {
+      drawStatus("Found devices", "Starting sensor...");
+      delay(400);
+      return;
+    }
+  }
+
+  Wire1.end();
+}
+
+void loop() {
+  if (!busFound || !oledOk || !sensorOk) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (now - lastPollMs < SENSOR_POLL_MS) return;
+  lastPollMs = now;
+
+  uint16_t mm = tof.readRangeContinuousMillimeters();
+  if (tof.timeoutOccurred()) {
+    drawStatus("Sensor timeout", "Check wiring/power");
+    return;
+  }
+
+  lastRangeMm = mm;
+  drawDistance(lastRangeMm);
+}

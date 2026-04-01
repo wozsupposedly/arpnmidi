@@ -1,0 +1,131 @@
+/*
+  oled_vl53_test_gp23.txt
+  Fixed-pin test for RP2040 Zero with OLED + VL53L0X on pins 2/3.
+
+  Wiring expected:
+  - 2 = SDA
+  - 3 = SCL
+  - OLED I2C address 0x3C
+  - VL53L0X I2C address 0x29
+
+  This sketch always tries to start the OLED first.
+  If the sensor fails, the OLED should still show that error.
+*/
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <VL53L0X.h>
+
+constexpr uint8_t PIN_SDA = 2;
+constexpr uint8_t PIN_SCL = 3;
+constexpr uint8_t OLED_ADDR = 0x3C;
+constexpr uint8_t VL53_ADDR = 0x29;
+constexpr uint8_t SCREEN_W = 128;
+constexpr uint8_t SCREEN_H = 64;
+
+Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire1, -1);
+VL53L0X tof;
+
+bool oledOk = false;
+bool sensorOk = false;
+uint32_t lastUpdateMs = 0;
+
+bool i2cPresent(uint8_t addr) {
+  Wire1.beginTransmission(addr);
+  return Wire1.endTransmission() == 0;
+}
+
+void showLines(const char *a, const char *b = nullptr, const char *c = nullptr, const char *d = nullptr) {
+  if (!oledOk) return;
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println(F("OLED + VL53 TEST"));
+  display.setCursor(0, 12);
+  display.println(a);
+  if (b) display.println(b);
+  if (c) display.println(c);
+  if (d) display.println(d);
+  display.display();
+}
+
+void showDistance(uint16_t mm) {
+  if (!oledOk) return;
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println(F("pins 2/3  addr 29/3C"));
+  display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+  display.setTextSize(2);
+  display.setCursor(0, 18);
+  display.println(F("DISTANCE"));
+  display.setTextSize(3);
+  display.setCursor(0, 40);
+  display.print(mm);
+  display.setTextSize(2);
+  display.print(F("mm"));
+  display.display();
+}
+
+void setup() {
+  Wire1.setSDA(PIN_SDA);
+  Wire1.setSCL(PIN_SCL);
+  Wire1.begin();
+  Wire1.setClock(400000);
+  delay(50);
+
+  oledOk = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  if (!oledOk) return;
+
+  showLines("OLED OK", "Checking sensor...");
+  delay(250);
+
+  const bool sawOled = i2cPresent(OLED_ADDR);
+  const bool sawVl53 = i2cPresent(VL53_ADDR);
+
+  if (!sawOled && !sawVl53) {
+    showLines("No I2C devices seen", "on pins 2/3");
+    return;
+  }
+  if (!sawOled) {
+    showLines("OLED init worked but", "0x3C probe failed");
+    return;
+  }
+  if (!sawVl53) {
+    showLines("OLED found", "VL53L0X missing", "Expected addr 0x29");
+    return;
+  }
+
+  tof.setBus(&Wire1);
+  if (!tof.init()) {
+    showLines("VL53L0X found", "but init failed");
+    return;
+  }
+
+  tof.setTimeout(100);
+  tof.startContinuous();
+  sensorOk = true;
+  showLines("OLED OK", "VL53L0X OK", "Starting...");
+  delay(300);
+}
+
+void loop() {
+  if (!oledOk) return;
+  if (!sensorOk) return;
+
+  const uint32_t now = millis();
+  if (now - lastUpdateMs < 60) return;
+  lastUpdateMs = now;
+
+  const uint16_t mm = tof.readRangeContinuousMillimeters();
+  if (tof.timeoutOccurred()) {
+    showLines("Sensor timeout", "Check power/wiring");
+    return;
+  }
+
+  showDistance(mm);
+}
