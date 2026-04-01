@@ -4,8 +4,8 @@
 
   Pin plan using the board labels you can see on this RP2040 Zero:
 
-  0   DIN MIDI IN
-  1   DIN MIDI OUT
+  0   DIN MIDI OUT
+  1   DIN MIDI IN
   2   I2C SDA for SSD1306 + VL53L0X
   3   I2C SCL for SSD1306 + VL53L0X
   6   Encoder A
@@ -19,7 +19,7 @@
   11 intentionally avoided.
 
   Notes:
-  - USB host is implemented for RP2040 PIO-USB on GP16/GP17.
+  - USB host is implemented for RP2040 PIO-USB on pins 14/15.
   - Build this with the Arduino-Pico core, Tools->USB Stack = Adafruit TinyUSB,
     and CPU speed = 120 MHz or 240 MHz.
   - Install Pico-PIO-USB manually since it is not in Arduino Library Manager:
@@ -33,12 +33,13 @@
 */
 
 #include <Arduino.h>
-#include <SerialUART.h>
 #include <Wire.h>
 #include <EEPROM.h>
 #include <MIDI.h>
+#include <Adafruit_NeoPixel.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <Fonts/FreeSans9pt7b.h>
 #include <VL53L0X.h>
 
 #ifndef ARPNMIDI_ENABLE_USB_HOST
@@ -51,8 +52,8 @@
 #include "pio_usb.h"
 #endif
 
-constexpr uint8_t PIN_DIN_MIDI_RX = 0;
-constexpr uint8_t PIN_DIN_MIDI_TX = 1;
+constexpr uint8_t PIN_DIN_MIDI_RX = 1;
+constexpr uint8_t PIN_DIN_MIDI_TX = 0;
 constexpr uint8_t PIN_I2C_SDA = 2;
 constexpr uint8_t PIN_I2C_SCL = 3;
 constexpr uint8_t PIN_ENC_A = 6;
@@ -63,6 +64,7 @@ constexpr uint8_t PIN_FOOT_2 = 10;
 constexpr uint8_t PIN_USB_HOST_DP = 14;
 constexpr uint8_t PIN_USB_HOST_DM = 15;
 constexpr uint8_t PIN_USB_HOST_VBUS_EN = 255;
+constexpr uint8_t PIN_RGB_LED = 16;
 
 constexpr uint8_t OLED_ADDR = 0x3C;
 constexpr uint8_t SCREEN_W = 128;
@@ -73,13 +75,19 @@ constexpr uint8_t BOTTOM_H = 16;
 
 constexpr uint8_t VL53_VALID_MIN_MM = 60;
 constexpr uint16_t VL53_VALID_MAX_MM = 600;
+constexpr uint16_t SENSOR_LED_MAX_MM = 588;
+constexpr uint16_t SENSOR_ACTIVE_MAX_MM = VL53_VALID_MIN_MM + (((SENSOR_LED_MAX_MM - VL53_VALID_MIN_MM) * 9) / 10);
+constexpr uint8_t SENSOR_NOTE_FAR_TRIM_PCT = 10;
+constexpr uint8_t SENSOR_NOTE_CLOSE_TRIM_PCT = 4;
 constexpr uint16_t SENSOR_POLL_MS = 20;
 constexpr uint32_t SENSOR_TIMEOUT_MS = 300;
 
 constexpr uint32_t SCREEN_SAVER_IDLE_MS = 60000UL;
+constexpr uint32_t SCREEN_SAVER_REFRESH_MS = 4000UL;
 constexpr uint32_t LONG_HOLD_PANIC_MS = 2000UL;
 constexpr uint32_t PEDAL_DEBOUNCE_MS = 25UL;
 constexpr uint32_t PEDAL_PULSE_MS = 35UL;
+constexpr uint8_t ENCODER_COUNTS_PER_DETENT = 4;
 
 constexpr uint8_t MAX_HELD_NOTES = 32;
 constexpr uint8_t MAX_ARP_OUTPUT_NOTES = 8;
@@ -88,10 +96,11 @@ constexpr uint8_t MAX_USB_MIDI_DEVICES = 8;
 constexpr uint16_t EEPROM_MAGIC = 0x4D41;
 constexpr size_t EEPROM_BYTES = 2048;
 
-SerialUART &DinSerial = Serial1;
+decltype(Serial1) &DinSerial = Serial1;
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, DinMIDI);
-Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
+Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire1, -1);
 VL53L0X tof;
+Adafruit_NeoPixel onboardRgb(1, PIN_RGB_LED, NEO_GRB + NEO_KHZ800);
 #if ARPNMIDI_ENABLE_USB_HOST
 Adafruit_USBH_Host USBHost;
 #endif
@@ -190,7 +199,7 @@ enum SensorModeId : uint8_t {
   SENSOR_PARAM_MINUS2,
   SENSOR_PARAM_PLUS3,
   SENSOR_PARAM_MINUS3,
-  SENSOR_PARAM_PERCENT,
+  SENSOR_PARAM_FULL,
   SENSOR_PITCH_UP,
   SENSOR_PITCH_DOWN,
   SENSOR_NOTES_C0,
@@ -298,9 +307,12 @@ struct PedalPulse {
 
 struct EncoderState {
   uint8_t lastAB = 0;
+  int8_t stepAccum = 0;
   bool lastSwitch = true;
   bool switchDown = false;
   bool turnWhilePressed = false;
+  uint32_t lastTurnMs = 0;
+  uint32_t switchIgnoreUntilMs = 0;
   uint32_t switchChangeMs = 0;
   uint32_t pressStartMs = 0;
 };
@@ -320,10 +332,16 @@ struct SensorRuntime {
 struct UiState {
   bool dirty = true;
   bool inSaver = false;
+  bool hasPendingEdit = false;
+  bool deferredExitWork = false;
+  bool deferredLoadPreset = false;
+  bool deferredSaveOnly = false;
   uint32_t lastActivityMs = 0;
   uint32_t lastRenderMs = 0;
   MenuMode menuMode = MENU_SELECT;
   uint8_t selectedSetting = 0;
+  uint8_t pendingSetting = 0;
+  int16_t pendingValue = 0;
 };
 
 StorageImage storage;
@@ -332,6 +350,11 @@ ClockTracker clockTracker;
 EncoderState encoder;
 SensorRuntime sensorRt;
 UiState ui;
+
+volatile uint8_t usbAnyMountedCount = 0;
+volatile uint8_t usbMidiMountedCount = 0;
+volatile uint8_t usbLastRxIdx = 0xFF;
+volatile uint32_t usbLastRxMs = 0;
 
 bool heldInputNotes[128];
 uint8_t heldVelocities[128];
@@ -349,15 +372,22 @@ uint8_t arpPatternStep = 0;
 bool arpPendulumUp = true;
 bool arpHadKeys = false;
 bool screenSaverSeeded = false;
+bool screenSaverForceNow = false;
 UsbMidiDevice usbMidiDevices[MAX_USB_MIDI_DEVICES];
 UsbMidiParser usbMidiParsers[MAX_USB_MIDI_DEVICES];
+const int8_t kEncoderTransitionTable[16] = {
+  0,  1, -1,  0,
+ -1,  0,  0,  1,
+  1,  0,  0, -1,
+  0, -1,  1,  0
+};
 
 const char *const kSettingNames[SETTING_COUNT] = {
   "1 BPM", "2 ARP MODE", "3 DIVISION", "4 VELOCITY", "5 LENGTH", "6 PATTERN",
-  "7 INPUT CH", "8 ARP OUT CH", "9 BASS CH", "10 THRU OUT CH", "11 REMOTE CH",
-  "12 SENSOR CH", "13 SENSOR MODE", "14 FORCE KEY", "15 FORCE SCALE",
-  "16 GUITAR/PIANO", "17 REMOTE 1", "18 REMOTE 2", "19 LOAD PRESET",
-  "20 SAVE PRESET", "21 SCREEN SAVER", "22 PANIC"
+  "7 INPUT CH", "8 ARP CH", "9 BASS CH", "10 THRU OUT CH", "11 REMOTE",
+  "12 EYE CH", "13 EYE MODE", "14 KEY", "15 SCALE",
+  "16 GIT/KEYS", "17 REMOTE 1", "18 REMOTE 2", "19 LOAD",
+  "20 SAVE", "21 SCRNSVR", "22 PANIC"
 };
 
 const char *const kArpModeNames[ARP_MODE_COUNT] = {
@@ -385,11 +415,12 @@ const char *const kForceScaleNames[FORCE_SCALE_COUNT] = {
 };
 
 const char *const kSensorModeNames[SENSOR_MODE_COUNT] = {
-  "OFF", "PARAM +2", "PARAM -2", "PARAM +3", "PARAM -3", "PARAM 0-100",
+  "OFF", "PARAM +2", "PARAM -2", "PARAM +3", "PARAM -3", "PARAM FULL",
   "PITCH UP", "PITCH DOWN", "NOTES C0", "NOTES C1", "NOTES C2", "NOTES C3",
-  "NOTES C4", "NOTES C5", "NOTES C6", "NOTES C7", "CC 1", "CC 2", "CC 3",
-  "CC 4", "CC 5", "CC 6", "CC 7", "CC 8", "CC 9", "CC 10", "CC 11", "CC 12",
-  "CC 13", "CC 14", "CC 15", "CC 16", "CC 17", "CC 18", "CC 19", "LOOP TRIG"
+  "NOTES C4", "NOTES C5", "NOTES C6", "NOTES C7",
+  "CC 1", "CC 2", "CC 3", "CC 4", "CC 5", "CC 6", "CC 7", "CC 8", "CC 9",
+  "CC 10", "CC 11", "CC 12", "CC 13", "CC 14", "CC 15", "CC 16", "CC 17", "CC 18", "CC 19",
+  "LOOP TRIG"
 };
 
 const char *const kNoteNames[12] = {
@@ -518,8 +549,9 @@ String midiChannelLabel(uint8_t value, bool allowOff = false) {
 
 String bassLabel(uint8_t value) {
   if (value == 0) return "OFF";
-  const uint8_t channel = ((value - 1) / 3) + 1;
-  const uint8_t octaves = ((value - 1) % 3) + 1;
+  const uint8_t channel = ((value - 1) / 4) + 1;
+  const uint8_t octaves = ((value - 1) % 4);
+  if (octaves == 0) return "CH " + String(channel) + " 0 OCT";
   return "CH " + String(channel) + " -" + String(octaves) + " OCT";
 }
 
@@ -530,6 +562,63 @@ String remoteActionLabel(uint8_t action) {
     return String("NOTE ") + kNoteNames[note] + String(octave);
   }
   return String("CC ") + String(action - 128 + 1);
+}
+
+void drawRemoteActionScreen(uint8_t action) {
+  display.setCursor(0, 0);
+  if (action < 128) {
+    const uint8_t octave = action / 12;
+    const uint8_t note = action % 12;
+    display.setTextSize(3);
+    display.print(kNoteNames[note]);
+    display.print(octave);
+    display.setTextSize(2);
+    display.setCursor(0, 26);
+    display.print(action);
+  } else {
+    display.setTextSize(3);
+    display.print(F("CC"));
+    display.print(action - 128 + 1);
+  }
+}
+
+void drawWrappedTopValue(const String &text) {
+  display.setTextSize(2);
+  String lines[3];
+  uint8_t lineCount = 0;
+  String remaining = text;
+
+  while (remaining.length() && lineCount < 3) {
+    int split = -1;
+    int lastSpace = -1;
+    for (int i = 0; i < remaining.length(); ++i) {
+      if (remaining[i] == ' ') lastSpace = i;
+      String candidate = remaining.substring(0, i + 1);
+      int16_t x1, y1;
+      uint16_t w, h;
+      display.getTextBounds(candidate, 0, 0, &x1, &y1, &w, &h);
+      if (w > SCREEN_W - 2) {
+        split = (lastSpace >= 0) ? lastSpace : (i - 1);
+        break;
+      }
+    }
+
+    if (split < 0) {
+      lines[lineCount++] = remaining;
+      break;
+    }
+
+    if (split <= 0) split = 1;
+    lines[lineCount++] = remaining.substring(0, split);
+    remaining = remaining.substring(split);
+    while (remaining.length() && remaining[0] == ' ') remaining.remove(0, 1);
+  }
+
+  const int topY = (lineCount > 1) ? 4 : 12;
+  for (uint8_t i = 0; i < lineCount; ++i) {
+    display.setCursor(0, topY + i * 16);
+    display.print(lines[i]);
+  }
 }
 
 void sendDinNoteOn(uint8_t channel1, uint8_t note, uint8_t velocity) {
@@ -615,15 +704,19 @@ void sendAllNoteOffChannel(uint8_t ch1) {
   sendFanout(255, 0xB0 | ((ch1 - 1) & 0x0F), 120, 0);
 }
 
-void panicAll() {
+void panicMidiOnly() {
   if (channelEnabled(settings.arpOutChannel)) sendAllNoteOffChannel(settings.arpOutChannel);
   if (channelEnabled(settings.thruOutChannel)) sendAllNoteOffChannel(settings.thruOutChannel);
-  if (settings.bassMode > 0) sendAllNoteOffChannel(((settings.bassMode - 1) / 3) + 1);
+  if (settings.bassMode > 0) sendAllNoteOffChannel(((settings.bassMode - 1) / 4) + 1);
   if (channelEnabled(settings.remoteChannel)) sendAllNoteOffChannel(settings.remoteChannel);
   if (channelEnabled(settings.sensorChannel)) sendAllNoteOffChannel(settings.sensorChannel);
   activeArpCount = 0;
   currentBassOutNote = -1;
   sensorRt.activeNote = -1;
+}
+
+void panicAll() {
+  panicMidiOnly();
   ui.menuMode = MENU_SELECT;
   ui.dirty = true;
   markActivity();
@@ -684,7 +777,7 @@ void rebuildHeldSorted() {
 
 int8_t bassOutputNoteForSource(uint8_t sourceNote) {
   if (settings.bassMode == 0) return -1;
-  const uint8_t octaves = ((settings.bassMode - 1) % 3) + 1;
+  const uint8_t octaves = ((settings.bassMode - 1) % 4);
   const int octaveShift = octaves * 12;
   int out = static_cast<int>(sourceNote) - octaveShift;
   if (out < 0) out = 0;
@@ -692,7 +785,7 @@ int8_t bassOutputNoteForSource(uint8_t sourceNote) {
 }
 
 void updateBassVoice() {
-  const uint8_t bassChannel = (settings.bassMode == 0) ? 0 : (((settings.bassMode - 1) / 3) + 1);
+  const uint8_t bassChannel = (settings.bassMode == 0) ? 0 : (((settings.bassMode - 1) / 4) + 1);
   if (!channelEnabled(bassChannel) || settings.arpOutChannel == bassChannel) {
     if (currentBassOutNote >= 0) {
       sendFanout(255, 0x80 | ((bassChannel - 1) & 0x0F), currentBassOutNote, 0);
@@ -729,7 +822,7 @@ void updateBassVoice() {
 uint8_t effectiveThruChannel() {
   if (!channelEnabled(settings.thruOutChannel)) return 0;
   if (settings.thruOutChannel == settings.arpOutChannel) return 0;
-  if (settings.bassMode > 0 && settings.thruOutChannel == (((settings.bassMode - 1) / 3) + 1)) return 0;
+  if (settings.bassMode > 0 && settings.thruOutChannel == (((settings.bassMode - 1) / 4) + 1)) return 0;
   return settings.thruOutChannel;
 }
 
@@ -784,7 +877,7 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_PATTERN: return PATTERN_COUNT - 1;
     case SET_INPUT_CH: return 16;
     case SET_ARP_OUT_CH: return 16;
-    case SET_BASS_CH: return 36;
+    case SET_BASS_CH: return 48;
     case SET_THRU_OUT_CH: return 16;
     case SET_REMOTE_CH: return 16;
     case SET_SENSOR_CH: return 16;
@@ -796,7 +889,7 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_REMOTE2: return 254;
     case SET_LOAD_PRESET: return PRESET_COUNT - 1;
     case SET_SAVE_PRESET: return PRESET_COUNT - 1;
-    case SET_SCREEN_SAVER: return 1;
+    case SET_SCREEN_SAVER: return 2;
     default: return 0;
   }
 }
@@ -821,9 +914,13 @@ int16_t getSettingValueRaw(uint8_t settingId) {
     case SET_GUITAR_PIANO: return settings.instrumentView;
     case SET_REMOTE1: return settings.remote1Action;
     case SET_REMOTE2: return settings.remote2Action;
-    case SET_LOAD_PRESET: return settings.loadPreset;
-    case SET_SAVE_PRESET: return settings.savePreset;
-    case SET_SCREEN_SAVER: return settings.screenSaver;
+    case SET_LOAD_PRESET:
+      if (ui.menuMode == MENU_SELECT && ui.selectedSetting == SET_LOAD_PRESET) return storage.currentPreset;
+      return settings.loadPreset;
+    case SET_SAVE_PRESET:
+      if (ui.menuMode == MENU_SELECT && ui.selectedSetting == SET_SAVE_PRESET) return storage.currentPreset;
+      return settings.savePreset;
+    case SET_SCREEN_SAVER: return screenSaverForceNow ? 2 : settings.screenSaver;
     default: return 0;
   }
 }
@@ -838,7 +935,7 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
     case SET_PATTERN: settings.pattern = clampU8(value, 0, PATTERN_COUNT - 1); break;
     case SET_INPUT_CH: settings.inputChannel = clampU8(value, 1, 16); break;
     case SET_ARP_OUT_CH: settings.arpOutChannel = clampU8(value, 0, 16); break;
-    case SET_BASS_CH: settings.bassMode = clampU8(value, 0, 36); break;
+    case SET_BASS_CH: settings.bassMode = clampU8(value, 0, 48); break;
     case SET_THRU_OUT_CH: settings.thruOutChannel = clampU8(value, 0, 16); break;
     case SET_REMOTE_CH: settings.remoteChannel = clampU8(value, 1, 16); break;
     case SET_SENSOR_CH: settings.sensorChannel = clampU8(value, 1, 16); break;
@@ -850,38 +947,47 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
     case SET_REMOTE2: settings.remote2Action = clampU8(value, 0, 254); break;
     case SET_LOAD_PRESET: settings.loadPreset = clampU8(value, 0, PRESET_COUNT - 1); break;
     case SET_SAVE_PRESET: settings.savePreset = clampU8(value, 0, PRESET_COUNT - 1); break;
-    case SET_SCREEN_SAVER: settings.screenSaver = clampU8(value, 0, 1); break;
+    case SET_SCREEN_SAVER:
+      if (value >= 2) {
+        screenSaverForceNow = true;
+      } else {
+        screenSaverForceNow = false;
+        settings.screenSaver = clampU8(value, 0, 1);
+      }
+      break;
     default: break;
   }
 }
 
 int16_t effectiveSettingValue(uint8_t settingId) {
+  if (ui.hasPendingEdit && ui.pendingSetting == settingId) return ui.pendingValue;
   if (!sensorRt.inRange || !sensorParamEligible(settingId)) return getSettingValueRaw(settingId);
   int16_t base = getSettingValueRaw(settingId);
   const int16_t maxValue = settingRangeMax(settingId);
   const uint8_t mode = settings.sensorMode;
   if (mode == SENSOR_PARAM_PLUS2 || mode == SENSOR_PARAM_MINUS2) {
-    const int delta = (sensorRt.mm < ((VL53_VALID_MIN_MM + VL53_VALID_MAX_MM) / 2)) ? 2 : 1;
+    const int delta = (sensorRt.mm < ((VL53_VALID_MIN_MM + SENSOR_ACTIVE_MAX_MM) / 2)) ? 2 : 1;
     return wrapIndex(base + ((mode == SENSOR_PARAM_PLUS2) ? delta : -delta), maxValue + 1);
   }
   if (mode == SENSOR_PARAM_PLUS3 || mode == SENSOR_PARAM_MINUS3) {
     int thirds = 1;
-    const int span = VL53_VALID_MAX_MM - VL53_VALID_MIN_MM;
-    const int rel = constrain(VL53_VALID_MAX_MM - sensorRt.mm, 0, span);
+    const int span = SENSOR_ACTIVE_MAX_MM - VL53_VALID_MIN_MM;
+    const int rel = constrain(SENSOR_ACTIVE_MAX_MM - sensorRt.mm, 0, span);
     if (rel > (span * 2) / 3) thirds = 3;
     else if (rel > span / 3) thirds = 2;
     const int delta = thirds;
     return wrapIndex(base + ((mode == SENSOR_PARAM_PLUS3) ? delta : -delta), maxValue + 1);
   }
-  if (mode == SENSOR_PARAM_PERCENT) {
-    const int span = VL53_VALID_MAX_MM - VL53_VALID_MIN_MM;
-    const int rel = constrain(VL53_VALID_MAX_MM - sensorRt.mm, 0, span);
+  if (mode == SENSOR_PARAM_FULL) {
+    const int span = SENSOR_ACTIVE_MAX_MM - VL53_VALID_MIN_MM;
+    const int rel = constrain(SENSOR_ACTIVE_MAX_MM - sensorRt.mm, 0, span);
     return map(rel, 0, span, 0, maxValue);
   }
   return base;
 }
 
 void loadCurrentPreset() {
+  screenSaverForceNow = false;
   settings = storage.presets[storage.currentPreset];
   settings.loadPreset = storage.currentPreset;
   settings.savePreset = storage.currentPreset;
@@ -945,7 +1051,7 @@ void applySettingDelta(int delta, bool fastStep) {
   if (id == SET_PANIC) return;
   const int fast = fastStep ? 10 : 1;
   const int step = delta * fast;
-  const int oldValue = getSettingValueRaw(id);
+  const int oldValue = (ui.hasPendingEdit && ui.pendingSetting == id) ? ui.pendingValue : getSettingValueRaw(id);
   int next = oldValue + step;
   const int maxValue = settingRangeMax(id);
 
@@ -953,16 +1059,17 @@ void applySettingDelta(int delta, bool fastStep) {
   else if (id == SET_INPUT_CH || id == SET_REMOTE_CH || id == SET_SENSOR_CH) next = constrain(next, 1, 16);
   else if (id == SET_VELOCITY) next = constrain(next, 1, 127);
   else if (id == SET_LENGTH) next = constrain(next, 1, 100);
+  else if (id == SET_FORCE_SCALE) next = constrain(next, 1, maxValue);
   else next = wrapIndex(next, maxValue + 1);
 
   if (next == oldValue) return;
-  if (settingNeedsPanic(id)) panicAll();
-  setSettingValueRaw(id, next);
-
-  if (id == SET_LOAD_PRESET) {
-    panicAll();
-    storage.currentPreset = settings.loadPreset;
-    loadCurrentPreset();
+  if (settingNeedsPanic(id) && ui.menuMode == MENU_EDIT) {
+    ui.hasPendingEdit = true;
+    ui.pendingSetting = id;
+    ui.pendingValue = next;
+  } else {
+    if (settingNeedsPanic(id)) panicMidiOnly();
+    setSettingValueRaw(id, next);
   }
 
   ui.dirty = true;
@@ -975,12 +1082,31 @@ void activateClickAction() {
     return;
   }
   if (ui.selectedSetting == SET_SAVE_PRESET) {
-    storage.currentPreset = settings.savePreset;
-    saveStorage();
-    ui.menuMode = MENU_SELECT;
+    if (ui.menuMode == MENU_EDIT) {
+      ui.menuMode = MENU_SELECT;
+      ui.deferredSaveOnly = true;
+      ui.deferredExitWork = true;
+    } else {
+      ui.menuMode = MENU_EDIT;
+    }
+    encoder.switchIgnoreUntilMs = millis() + 120;
+    ui.dirty = true;
     return;
   }
-  ui.menuMode = (ui.menuMode == MENU_SELECT) ? MENU_EDIT : MENU_SELECT;
+  if (ui.menuMode == MENU_EDIT) {
+    ui.menuMode = MENU_SELECT;
+    ui.deferredLoadPreset = (ui.selectedSetting == SET_LOAD_PRESET);
+    ui.deferredSaveOnly = false;
+    ui.deferredExitWork = true;
+  } else if (settingNeedsPanic(ui.selectedSetting)) {
+    ui.hasPendingEdit = true;
+    ui.pendingSetting = ui.selectedSetting;
+    ui.pendingValue = getSettingValueRaw(ui.selectedSetting);
+    ui.menuMode = MENU_EDIT;
+  } else {
+    ui.menuMode = MENU_EDIT;
+  }
+  encoder.switchIgnoreUntilMs = millis() + 120;
   ui.dirty = true;
 }
 
@@ -1001,21 +1127,27 @@ void pollEncoder() {
   const uint8_t last = encoder.lastAB;
 
   if (ab != last) {
-    int8_t delta = 0;
-    if ((last == 0b00 && ab == 0b01) || (last == 0b01 && ab == 0b11) ||
-        (last == 0b11 && ab == 0b10) || (last == 0b10 && ab == 0b00)) delta = 1;
-    if ((last == 0b00 && ab == 0b10) || (last == 0b10 && ab == 0b11) ||
-        (last == 0b11 && ab == 0b01) || (last == 0b01 && ab == 0b00)) delta = -1;
+    const int8_t delta = kEncoderTransitionTable[(last << 2) | ab];
     encoder.lastAB = ab;
     if (delta != 0) {
       encoder.turnWhilePressed |= encoder.switchDown;
-      encoderTurn(delta, encoder.switchDown);
+      encoder.lastTurnMs = millis();
+      encoder.switchIgnoreUntilMs = encoder.lastTurnMs + 120;
+      encoder.stepAccum += delta;
+      if (encoder.stepAccum >= ENCODER_COUNTS_PER_DETENT) {
+        encoder.stepAccum -= ENCODER_COUNTS_PER_DETENT;
+        encoderTurn(1, encoder.switchDown);
+      } else if (encoder.stepAccum <= -ENCODER_COUNTS_PER_DETENT) {
+        encoder.stepAccum += ENCODER_COUNTS_PER_DETENT;
+        encoderTurn(-1, encoder.switchDown);
+      }
     }
   }
 
   const bool sw = digitalRead(PIN_ENC_SW);
   const uint32_t now = millis();
-  if (sw != encoder.lastSwitch && (now - encoder.switchChangeMs) > 8) {
+  if (sw != encoder.lastSwitch && now >= encoder.switchIgnoreUntilMs &&
+      (now - encoder.switchChangeMs) > 12) {
     encoder.switchChangeMs = now;
     encoder.lastSwitch = sw;
     if (!sw) {
@@ -1172,6 +1304,8 @@ void pollUsbMidiInput(uint8_t idx) {
   while (true) {
     const uint32_t n = tuh_midi_stream_read(idx, &cable, buffer, sizeof(buffer));
     if (n == 0) break;
+    usbLastRxIdx = idx;
+    usbLastRxMs = millis();
     const uint8_t sourcePort = usbPortFromIdx(idx);
     for (uint32_t i = 0; i < n; ++i) {
       processUsbMidiByte(sourcePort, parser, buffer[i]);
@@ -1205,6 +1339,11 @@ void setupUsbHost() {
 
 void taskUsbHost() {
   USBHost.task();
+  for (uint8_t idx = 0; idx < MAX_USB_MIDI_DEVICES; ++idx) {
+    if (tuh_midi_mounted(idx) && tuh_midi_read_available(idx) > 0) {
+      pollUsbMidiInput(idx);
+    }
+  }
   flushUsbMidiOutput();
 }
 
@@ -1229,6 +1368,8 @@ void tuh_midi_mount_cb(uint8_t idx, const tuh_midi_mount_cb_t *mount_cb_data) {
       usbMidiDevices[i].rxCableCount = mount_cb_data->rx_cable_count;
       usbMidiDevices[i].txCableCount = mount_cb_data->tx_cable_count;
       usbMidiParsers[idx] = UsbMidiParser{};
+      usbMidiMountedCount++;
+      ui.dirty = true;
       break;
     }
   }
@@ -1240,9 +1381,23 @@ void tuh_midi_umount_cb(uint8_t idx) {
     if (usbMidiDevices[i].mounted && usbMidiDevices[i].idx == idx) {
       usbMidiDevices[i] = UsbMidiDevice{};
       usbMidiParsers[idx] = UsbMidiParser{};
+      if (usbMidiMountedCount > 0) usbMidiMountedCount--;
+      ui.dirty = true;
       break;
     }
   }
+}
+
+void tuh_mount_cb(uint8_t daddr) {
+  (void)daddr;
+  usbAnyMountedCount++;
+  ui.dirty = true;
+}
+
+void tuh_umount_cb(uint8_t daddr) {
+  (void)daddr;
+  if (usbAnyMountedCount > 0) usbAnyMountedCount--;
+  ui.dirty = true;
 }
 
 void tuh_midi_rx_cb(uint8_t idx, uint32_t num_packets) {
@@ -1465,8 +1620,8 @@ void updateSensorOutput() {
     return;
   }
 
-  const int span = VL53_VALID_MAX_MM - VL53_VALID_MIN_MM;
-  const int rel = constrain(VL53_VALID_MAX_MM - sensorRt.mm, 0, span);
+  const int span = SENSOR_ACTIVE_MAX_MM - VL53_VALID_MIN_MM;
+  const int rel = constrain(SENSOR_ACTIVE_MAX_MM - sensorRt.mm, 0, span);
   const uint8_t pct = map(rel, 0, span, 0, 100);
 
   if (mode == SENSOR_PITCH_UP || mode == SENSOR_PITCH_DOWN) {
@@ -1481,7 +1636,14 @@ void updateSensorOutput() {
 
   if (mode >= SENSOR_NOTES_C0 && mode <= SENSOR_NOTES_C7) {
     const uint8_t rootOct = mode - SENSOR_NOTES_C0;
-    const uint8_t idx = map(pct, 0, 100, 0, 12);
+    const uint8_t noteSpan = 24;
+    // Ignore some noisy edge travel, and give the lowest note a little extra hold.
+    const uint8_t notePct = constrain(
+      map(pct, SENSOR_NOTE_FAR_TRIM_PCT, 100 - SENSOR_NOTE_CLOSE_TRIM_PCT, 0, 100),
+      0, 100
+    );
+    const int16_t paddedIdx = map(notePct, 0, 100, -2, noteSpan + 1);
+    const uint8_t idx = constrain(paddedIdx, 0, noteSpan);
     uint8_t note = (rootOct * 12) + idx;
     note = quantizeUp(note);
     if (note != sensorRt.activeNote) {
@@ -1513,21 +1675,54 @@ void updateSensorOutput() {
   }
 }
 
+void updateSensorLed() {
+  if (settings.sensorMode == SENSOR_OFF || !sensorRt.present || !sensorRt.inRange) {
+    onboardRgb.setPixelColor(0, onboardRgb.Color(0, 0, 0));
+    onboardRgb.show();
+    return;
+  }
+
+  const int span = SENSOR_LED_MAX_MM - VL53_VALID_MIN_MM;
+  const int rel = constrain(SENSOR_LED_MAX_MM - sensorRt.mm, 0, span);
+  const uint8_t pct = map(rel, 0, span, 0, 100);
+
+  uint8_t r = 0;
+  uint8_t g = 0;
+  uint8_t b = 0;
+
+  if (pct > 0 && pct <= 50) {
+    r = map(pct, 1, 50, 8, 255);
+  } else if (pct <= 85) {
+    r = 255;
+    g = map(pct, 51, 85, 0, 255);
+  } else {
+    r = 255;
+    g = 255;
+    b = map(pct, 86, 100, 0, 255);
+  }
+
+  onboardRgb.setPixelColor(0, onboardRgb.Color(r, g, b));
+  onboardRgb.show();
+}
+
 void pollSensor() {
   if (!sensorRt.present) return;
   const uint32_t now = millis();
   if ((now - sensorRt.lastPollMs) < SENSOR_POLL_MS) return;
   sensorRt.lastPollMs = now;
+  const bool wasInRange = sensorRt.inRange;
 
   uint16_t mm = tof.readRangeContinuousMillimeters();
   if (tof.timeoutOccurred()) {
     sensorRt.inRange = false;
     updateSensorOutput();
+    updateSensorLed();
+    if (wasInRange && sensorParamEligible(ui.selectedSetting)) ui.dirty = true;
     return;
   }
 
   sensorRt.mm = mm;
-  sensorRt.inRange = (mm >= VL53_VALID_MIN_MM && mm <= VL53_VALID_MAX_MM);
+  sensorRt.inRange = (mm >= VL53_VALID_MIN_MM && mm <= SENSOR_ACTIVE_MAX_MM);
   if (sensorRt.inRange) {
     sensorRt.lastSeenMs = now;
     markActivity(false);
@@ -1536,7 +1731,12 @@ void pollSensor() {
     sensorRt.inRange = false;
   }
 
+  if (wasInRange != sensorRt.inRange && sensorParamEligible(ui.selectedSetting)) {
+    ui.dirty = true;
+  }
+
   updateSensorOutput();
+  updateSensorLed();
 }
 
 String settingValueString(uint8_t id) {
@@ -1565,7 +1765,10 @@ String settingValueString(uint8_t id) {
     case SET_REMOTE2: return remoteActionLabel(v);
     case SET_LOAD_PRESET: return String(v + 1);
     case SET_SAVE_PRESET: return String(v + 1);
-    case SET_SCREEN_SAVER: return (v == 0) ? "OFF" : "AUTO";
+    case SET_SCREEN_SAVER:
+      if (v == 0) return "OFF";
+      if (v == 1) return "AUTO";
+      return "NOW";
     case SET_PANIC: return "CLICK";
     default: return "";
   }
@@ -1573,24 +1776,32 @@ String settingValueString(uint8_t id) {
 
 void drawBottomLabel() {
   display.fillRect(0, BOTTOM_Y, SCREEN_W, BOTTOM_H, SSD1306_BLACK);
-  display.drawLine(0, BOTTOM_Y, SCREEN_W - 1, BOTTOM_Y, SSD1306_WHITE);
   display.setTextColor(SSD1306_WHITE);
+  display.setFont(&FreeSans9pt7b);
   display.setTextSize(1);
-  display.setCursor(0, 53);
-  display.print(kSettingNames[ui.selectedSetting]);
-  display.setCursor(110, 53);
-  display.print((ui.menuMode == MENU_SELECT) ? "SEL" : "VAL");
+  display.setCursor(0, 62);
+  if (ui.selectedSetting == SET_FORCE_KEY) {
+    const int16_t key = effectiveSettingValue(SET_FORCE_KEY);
+    display.print(F("KEY "));
+    if (key == 0) display.print(F("OFF"));
+    else display.print(kNoteNames[key - 1]);
+  } else if (ui.selectedSetting == SET_FORCE_SCALE) {
+    display.print(kForceScaleNames[effectiveSettingValue(SET_FORCE_SCALE)]);
+  } else {
+    display.print(kSettingNames[ui.selectedSetting]);
+  }
+  display.setFont();
 }
 
 void drawBarValue(uint8_t pct, const String &label) {
   const uint8_t barW = map(pct, 0, 100, 0, SCREEN_W);
   display.drawRect(0, 0, SCREEN_W, 24, SSD1306_WHITE);
   display.fillRect(1, 1, min<int>(barW, SCREEN_W - 2), 22, SSD1306_WHITE);
-  display.setTextColor((pct > 60) ? SSD1306_BLACK : SSD1306_WHITE);
-  display.setTextSize(2);
-  display.setCursor(34, 28);
-  display.print(label);
+  display.fillRect(0, 26, SCREEN_W, 20, SSD1306_BLACK);
   display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+  display.setCursor(0, 28);
+  display.print(label);
 }
 
 void drawDivisionPie(uint8_t divisionId) {
@@ -1601,7 +1812,7 @@ void drawDivisionPie(uint8_t divisionId) {
     display.drawLine(64, 20, 64 + static_cast<int>(cos(a) * 18), 20 + static_cast<int>(sin(a) * 18), SSD1306_WHITE);
   }
   display.setTextSize(2);
-  display.setCursor(28, 28);
+  display.setCursor(0, 28);
   display.print(kDivisionNames[divisionId]);
 }
 
@@ -1652,42 +1863,90 @@ void drawPatternPreview(uint8_t pat) {
   }
 }
 
-void buildScaleMask(bool *mask) {
+void buildScaleMask(bool *mask, int16_t keyValue = -1, int16_t scaleValue = -1) {
   memset(mask, 0, 12);
-  if (settings.forceKey == 0 || settings.forceScale == SCALE_OFF) return;
-  for (uint8_t n = 0; n < 12; ++n) mask[n] = noteInScale(n, settings.forceKey, settings.forceScale);
+  const uint8_t key = (keyValue < 0) ? settings.forceKey : static_cast<uint8_t>(keyValue);
+  const uint8_t scale = (scaleValue < 0) ? settings.forceScale : static_cast<uint8_t>(scaleValue);
+  if (key == 0 || scale == SCALE_OFF) return;
+  for (uint8_t n = 0; n < 12; ++n) mask[n] = noteInScale(n, key, scale);
+}
+
+bool noteHeldInInputPc(uint8_t pc) {
+  for (uint8_t n = 0; n < 128; ++n) {
+    if (heldInputNotes[n] && (n % 12) == pc) return true;
+  }
+  return false;
+}
+
+bool isRootPc(uint8_t pc, int16_t keyValue = -1) {
+  const int16_t key = (keyValue < 0) ? settings.forceKey : keyValue;
+  return key > 0 && pc == static_cast<uint8_t>(key - 1);
 }
 
 void drawGuitarView() {
   bool mask[12];
-  buildScaleMask(mask);
+  const int16_t key = (ui.selectedSetting == SET_FORCE_KEY) ? effectiveSettingValue(SET_FORCE_KEY) : settings.forceKey;
+  const int16_t scale = (ui.selectedSetting == SET_FORCE_SCALE) ? effectiveSettingValue(SET_FORCE_SCALE) : settings.forceScale;
+  buildScaleMask(mask, key, scale);
   for (uint8_t s = 0; s < 6; ++s) display.drawLine(0, 4 + s * 7, 127, 4 + s * 7, SSD1306_WHITE);
+  display.drawLine(5, 0, 5, 42, SSD1306_WHITE);
   for (uint8_t f = 0; f < 13; ++f) display.drawLine(6 + f * 10, 0, 6 + f * 10, 42, SSD1306_WHITE);
+  const uint8_t markerFrets[5] = {3, 5, 7, 9, 12};
+  for (uint8_t i = 0; i < 5; ++i) {
+    const uint8_t fret = markerFrets[i];
+    const int mx = 6 + (fret - 1) * 10 + 5;
+    if (fret == 12) {
+      display.drawPixel(mx, 14, SSD1306_WHITE);
+      display.drawPixel(mx, 15, SSD1306_WHITE);
+      display.drawPixel(mx, 28, SSD1306_WHITE);
+      display.drawPixel(mx, 29, SSD1306_WHITE);
+    } else {
+      display.drawPixel(mx, 21, SSD1306_WHITE);
+      display.drawPixel(mx, 22, SSD1306_WHITE);
+    }
+  }
   const uint8_t openPcs[6] = {4, 9, 2, 7, 11, 4};
   for (uint8_t string = 0; string < 6; ++string) {
     for (uint8_t fret = 0; fret < 12; ++fret) {
       const uint8_t pc = (openPcs[string] + fret) % 12;
       const int x = 1 + fret * 10;
       const int y = 4 + string * 7;
-      if (mask[pc]) display.fillCircle(x, y, 2, SSD1306_WHITE);
+      if (mask[pc]) {
+        if (isRootPc(pc, key)) {
+          display.fillCircle(x, y, 2, SSD1306_BLACK);
+          display.drawCircle(x, y, 2, SSD1306_WHITE);
+          display.drawLine(x, y - 2, x, y + 2, SSD1306_WHITE);
+        } else {
+          display.fillCircle(x, y, 2, SSD1306_WHITE);
+        }
+      }
+      if (noteHeldInInputPc(pc)) display.drawCircle(x, y, 4, SSD1306_WHITE);
     }
   }
 }
 
 void drawPianoView() {
   bool mask[12];
-  buildScaleMask(mask);
+  const int16_t key = (ui.selectedSetting == SET_FORCE_KEY) ? effectiveSettingValue(SET_FORCE_KEY) : settings.forceKey;
+  const int16_t scale = (ui.selectedSetting == SET_FORCE_SCALE) ? effectiveSettingValue(SET_FORCE_SCALE) : settings.forceScale;
+  buildScaleMask(mask, key, scale);
   const uint8_t whiteMap[7] = {0, 2, 4, 5, 7, 9, 11};
   for (uint8_t i = 0; i < 7; ++i) {
     const int x = i * 18;
     display.drawRect(x, 0, 18, 42, SSD1306_WHITE);
-    if (mask[whiteMap[i]]) display.fillRect(x + 4, 24, 10, 12, SSD1306_WHITE);
+    const int cx = x + 9;
+    const int cy = 31;
+    if (mask[whiteMap[i]]) display.fillCircle(cx, cy, 3, SSD1306_WHITE);
+    if (noteHeldInInputPc(whiteMap[i])) display.drawCircle(cx, cy, 5, SSD1306_WHITE);
   }
   const uint8_t blackPcs[5] = {1, 3, 6, 8, 10};
   const uint8_t blackPos[5] = {13, 31, 67, 85, 103};
   for (uint8_t i = 0; i < 5; ++i) {
     display.fillRect(blackPos[i], 0, 10, 22, SSD1306_WHITE);
-    if (mask[blackPcs[i]]) display.fillRect(blackPos[i] + 2, 16, 6, 4, SSD1306_BLACK);
+    const int cx = blackPos[i] + 5;
+    const int cy = 14;
+    if (mask[blackPcs[i]]) display.fillCircle(cx, cy, 3, SSD1306_BLACK);
+    if (noteHeldInInputPc(blackPcs[i])) display.drawCircle(cx, cy, 5, SSD1306_BLACK);
   }
 }
 
@@ -1704,6 +1963,74 @@ void drawPresetGrid(uint8_t slot) {
   display.setTextSize(2);
   display.setCursor(0, 16);
   display.print(slot + 1);
+}
+
+void drawModeIndicator() {
+  const int x = 122;
+  const int topY = 44;
+  const int bottomY = 56;
+  if (ui.menuMode == MENU_EDIT) display.fillCircle(x, topY, 3, SSD1306_WHITE);
+  else display.fillCircle(x, bottomY, 3, SSD1306_WHITE);
+}
+
+void drawChannelScreen(const __FlashStringHelper *title, int channel, bool allowOff = false) {
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(title);
+  display.setTextSize(3);
+  display.setCursor(0, 18);
+  if (allowOff && channel == 0) display.print(F("OFF"));
+  else {
+    display.print(F("CH "));
+    display.print(channel);
+  }
+}
+
+void drawBassScreen(uint8_t mode) {
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(F("BASS "));
+  if (mode == 0) {
+    display.setTextSize(3);
+    display.setCursor(0, 18);
+    display.print(F("OFF"));
+    return;
+  }
+  const uint8_t channel = ((mode - 1) / 4) + 1;
+  const uint8_t octaves = ((mode - 1) % 4);
+  display.setTextSize(2);
+  display.setCursor(60, 0);
+  if (octaves == 0) display.print(F("0oct"));
+  else {
+    display.print(F("-"));
+    display.print(octaves);
+    display.print(F("oct"));
+  }
+  display.setTextSize(3);
+  display.setCursor(0, 18);
+  display.print(F("CH "));
+  display.print(channel);
+}
+
+void drawUsbDebugScreen() {
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(F("DEV "));
+  display.print(static_cast<uint8_t>(usbAnyMountedCount));
+  display.setCursor(0, 16);
+  display.print(F("MIDI "));
+  display.print(static_cast<uint8_t>(usbMidiMountedCount));
+  display.setCursor(0, 32);
+  display.print(F("RX "));
+  if (usbLastRxIdx == 0xFF) {
+    display.print(F("--"));
+  } else {
+    display.print(usbLastRxIdx);
+    display.print(' ');
+    const uint32_t age = millis() - usbLastRxMs;
+    if (age > 9999) display.print(F("OLD"));
+    else display.print(age);
+  }
 }
 
 void renderMainTop() {
@@ -1730,18 +2057,43 @@ void renderMainTop() {
     case SET_PATTERN:
       drawPatternPreview(v);
       break;
+    case SET_INPUT_CH:
+      drawChannelScreen(F("INPUT"), v);
+      break;
+    case SET_ARP_OUT_CH:
+      drawChannelScreen(F("ARP"), v, true);
+      break;
+    case SET_BASS_CH:
+      drawBassScreen(v);
+      break;
+    case SET_THRU_OUT_CH:
+      drawChannelScreen(F("THRU"), v, true);
+      break;
+    case SET_REMOTE_CH:
+      drawChannelScreen(F("REMOTE"), v);
+      break;
+    case SET_SENSOR_CH:
+      drawChannelScreen(F("SENSOR"), v);
+      break;
+    case SET_FORCE_KEY:
+    case SET_FORCE_SCALE:
     case SET_GUITAR_PIANO:
-      if (v == 0) drawGuitarView();
+      if (effectiveSettingValue(SET_GUITAR_PIANO) == 0) drawGuitarView();
       else drawPianoView();
+      break;
+    case SET_REMOTE1:
+    case SET_REMOTE2:
+      drawRemoteActionScreen(v);
       break;
     case SET_LOAD_PRESET:
     case SET_SAVE_PRESET:
       drawPresetGrid(v);
       break;
+    case SET_PANIC:
+      drawUsbDebugScreen();
+      break;
     default:
-      display.setTextSize((settingValueString(id).length() > 9) ? 1 : 2);
-      display.setCursor(0, 10);
-      display.print(settingValueString(id));
+      drawWrappedTopValue(settingValueString(id));
       break;
   }
 }
@@ -1764,13 +2116,17 @@ void drawScreenSaver() {
     display.drawPixel(sx, sy, SSD1306_WHITE);
   }
   for (uint8_t i = 0; i < 18; ++i) display.drawPixel(random(128), random(16), SSD1306_WHITE);
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, random(56));
+  display.print(F("woz.lol"));
   display.display();
 }
 
 void renderDisplayIfNeeded() {
   const uint32_t now = millis();
-  if (settings.screenSaver && (now - ui.lastActivityMs) > SCREEN_SAVER_IDLE_MS) {
-    if (!ui.inSaver || (now - ui.lastRenderMs) > 1500) {
+  if (screenSaverForceNow || (settings.screenSaver && (now - ui.lastActivityMs) > SCREEN_SAVER_IDLE_MS)) {
+    if (!ui.inSaver || (now - ui.lastRenderMs) > SCREEN_SAVER_REFRESH_MS) {
       ui.inSaver = true;
       drawScreenSaver();
       ui.lastRenderMs = now;
@@ -1783,23 +2139,68 @@ void renderDisplayIfNeeded() {
   display.clearDisplay();
   renderMainTop();
   drawBottomLabel();
+  drawModeIndicator();
   display.display();
   ui.dirty = false;
   ui.lastRenderMs = now;
 }
 
-void setupDisplay() {
-  Wire.setSDA(PIN_I2C_SDA);
-  Wire.setSCL(PIN_I2C_SCL);
-  Wire.begin();
-  Wire.setClock(400000);
-  display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+void processDeferredUiActions() {
+  if (!ui.deferredExitWork) return;
+
+  if (ui.deferredSaveOnly) {
+    storage.currentPreset = settings.savePreset;
+    saveStorage();
+    settings.loadPreset = storage.currentPreset;
+    settings.savePreset = storage.currentPreset;
+    ui.dirty = true;
+  } else if (ui.deferredLoadPreset) {
+    panicAll();
+    storage.currentPreset = settings.loadPreset;
+    loadCurrentPreset();
+  } else {
+    if (ui.hasPendingEdit && ui.pendingSetting == ui.selectedSetting) {
+      panicMidiOnly();
+      setSettingValueRaw(ui.pendingSetting, ui.pendingValue);
+      ui.hasPendingEdit = false;
+    }
+    saveStorage();
+  }
+
+  ui.deferredExitWork = false;
+  ui.deferredLoadPreset = false;
+  ui.deferredSaveOnly = false;
+}
+
+void showBootStage(const __FlashStringHelper *line1,
+                   const __FlashStringHelper *line2 = nullptr) {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.println(F("ARPNMIDI"));
+  display.setTextSize(1);
+  display.setCursor(0, 24);
+  display.println(line1);
+  if (line2) display.println(line2);
+  display.display();
+}
+
+void setupDisplay() {
+  Wire1.setSDA(PIN_I2C_SDA);
+  Wire1.setSCL(PIN_I2C_SCL);
+  Wire1.begin();
+  Wire1.setClock(400000);
+  display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  display.setRotation(2);
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  showBootStage(F("Display OK"), F("Starting..."));
   display.display();
 }
 
 void setupSensor() {
+  tof.setBus(&Wire1);
   sensorRt.present = tof.init();
   if (!sensorRt.present) return;
   tof.setTimeout(50);
@@ -1831,16 +2232,25 @@ void setupPins() {
   encoder.lastSwitch = digitalRead(PIN_ENC_SW);
   pedal1State = digitalRead(PIN_FOOT_1);
   pedal2State = digitalRead(PIN_FOOT_2);
+  onboardRgb.begin();
+  onboardRgb.setBrightness(80);
+  onboardRgb.setPixelColor(0, onboardRgb.Color(0, 0, 0));
+  onboardRgb.show();
 }
 
 void setup() {
   delay(300);
   setupPins();
   setupDisplay();
+  showBootStage(F("Storage..."));
   initStorageIfNeeded();
+  showBootStage(F("Held state..."));
   resetHeldState();
+  showBootStage(F("Sensor..."));
   setupSensor();
+  showBootStage(F("DIN MIDI..."));
   setupDinMidi();
+  showBootStage(F("Ready"));
   ui.lastActivityMs = millis();
   ui.dirty = true;
 }
@@ -1852,4 +2262,5 @@ void loop() {
   pollSensor();
   tickArp();
   renderDisplayIfNeeded();
+  processDeferredUiActions();
 }
