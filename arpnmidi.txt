@@ -126,6 +126,8 @@ void showBootStage(const __FlashStringHelper *line1,
                    const __FlashStringHelper *line2 = nullptr);
 [[noreturn]] void panicAndRestartHost();
 void arpNoteOffs();
+void noteThrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on);
+void updateBassVoice();
 
 enum MenuMode : uint8_t {
   MENU_SELECT = 0,
@@ -253,6 +255,7 @@ enum SensorModeId : uint8_t {
   SENSOR_VEL_DOWN,
   SENSOR_LEN_DOWN,
   SENSOR_ARP_LATCH,
+  SENSOR_ARP_LATCH_PLUS,
   SENSOR_PITCH_UP,
   SENSOR_PITCH_DOWN,
   SENSOR_NOTES_C0,
@@ -441,6 +444,7 @@ bool heldInputNotes[128];
 uint8_t heldVelocities[128];
 bool arpLatchedNotes[128];
 uint8_t arpLatchedVelocities[128];
+bool thruLatchedNotes[128];
 bool heldDrumNotes[128];
 uint8_t heldDrumVelocities[128];
 uint8_t mappedThruNotes[128];
@@ -520,7 +524,7 @@ const char *const kForceScaleNames[FORCE_SCALE_COUNT] = {
 
 const char *const kSensorModeNames[SENSOR_MODE_COUNT] = {
   "OFF", "DIV +2", "DIV -2", "DIV +3", "DIV -3", "DIV FULL",
-  "VEL DOWN", "LEN DOWN", "ARP LATCH", "PITCH UP", "PITCH DOWN", "NOTES C0", "NOTES C1", "NOTES C2", "NOTES C3",
+  "VEL DOWN", "LEN DOWN", "ARP LATCH", "ARP LATCH+", "PITCH UP", "PITCH DOWN", "NOTES C0", "NOTES C1", "NOTES C2", "NOTES C3",
   "NOTES C4", "NOTES C5", "NOTES C6", "NOTES C7",
   "CC 1", "CC 2", "CC 3", "CC 4", "CC 5", "CC 6", "CC 7", "CC 8", "CC 9",
   "CC 10", "CC 11", "CC 12", "CC 13", "CC 14", "CC 15", "CC 16", "CC 17", "CC 18", "CC 19",
@@ -730,15 +734,28 @@ uint8_t divNoteSlotToDivision(uint8_t slot) {
 }
 
 bool arpLatchEnabled() {
-  return settings.sensorMode == SENSOR_ARP_LATCH;
+  return settings.sensorMode == SENSOR_ARP_LATCH || settings.sensorMode == SENSOR_ARP_LATCH_PLUS;
+}
+
+bool arpLatchPlusEnabled() {
+  return settings.sensorMode == SENSOR_ARP_LATCH_PLUS;
 }
 
 void clearArpLatchNotes() {
+  if (arpLatchPlusEnabled()) {
+    for (uint8_t note = 0; note < 128; ++note) {
+      if (thruLatchedNotes[note]) {
+        noteThrough(255, note, 0, false);
+        thruLatchedNotes[note] = false;
+      }
+    }
+  }
   memset(arpLatchedNotes, 0, sizeof(arpLatchedNotes));
   memset(arpLatchedVelocities, 0, sizeof(arpLatchedVelocities));
   arpLatchAwaitingNewPhrase = false;
   arpHeldCount = 0;
   arpNoteOffs();
+  updateBassVoice();
 }
 
 uint8_t bassModeChannel(uint8_t value) {
@@ -975,6 +992,7 @@ void resetHeldState() {
   memset(heldVelocities, 0, sizeof(heldVelocities));
   memset(arpLatchedNotes, 0, sizeof(arpLatchedNotes));
   memset(arpLatchedVelocities, 0, sizeof(arpLatchedVelocities));
+  memset(thruLatchedNotes, 0, sizeof(thruLatchedNotes));
   memset(heldDrumNotes, 0, sizeof(heldDrumNotes));
   memset(heldDrumVelocities, 0, sizeof(heldDrumVelocities));
   memset(mappedThruNotes, 0, sizeof(mappedThruNotes));
@@ -1073,7 +1091,10 @@ void updateBassVoice() {
   }
 
   rebuildHeldSorted();
-  const int8_t nextSource = (heldCount > 0) ? heldSorted[0] : -1;
+  rebuildArpHeldSorted();
+  const int8_t nextSource = arpLatchPlusEnabled()
+                              ? ((arpHeldCount > 0) ? arpHeldSorted[0] : -1)
+                              : ((heldCount > 0) ? heldSorted[0] : -1);
   if (nextSource < 0) {
     if (currentBassOutNote >= 0) {
       sendFanout(255, 0x80 | ((bassChannel - 1) & 0x0F), currentBassOutNote, 0);
@@ -1390,6 +1411,7 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       settings.sensorMode = clampU8(value, 0, SENSOR_MODE_COUNT - 1);
       if (!arpLatchEnabled()) clearArpLatchNotes();
       rebuildArpHeldSorted();
+      updateBassVoice();
       break;
     case SET_FORCE_KEY: settings.forceKey = clampU8(value, 0, 12); break;
     case SET_FORCE_SCALE: settings.forceScale = clampU8(value, 0, FORCE_SCALE_COUNT - 1); break;
@@ -1732,6 +1754,10 @@ void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t vel
       arpLatchedNotes[note] = true;
       arpLatchedVelocities[note] = velocity;
       arpLatchAwaitingNewPhrase = false;
+      if (arpLatchPlusEnabled() && !thruLatchedNotes[note]) {
+        noteThrough(sourcePort, note, velocity, true);
+        thruLatchedNotes[note] = true;
+      }
     }
     heldInputNotes[note] = true;
     heldVelocities[note] = velocity;
@@ -1739,13 +1765,13 @@ void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t vel
       restartArpTiming(false);
     }
     arpHadKeys = true;
-    noteThrough(sourcePort, note, velocity, true);
+    if (!arpLatchPlusEnabled()) noteThrough(sourcePort, note, velocity, true);
     noteArpOffPassthrough(sourcePort, note, velocity, true);
   } else {
     heldInputNotes[note] = false;
     heldVelocities[note] = 0;
     if (arpLatchEnabled() && !anyPhysicalInputNotesHeld()) arpLatchAwaitingNewPhrase = true;
-    noteThrough(sourcePort, note, 0, false);
+    if (!arpLatchPlusEnabled()) noteThrough(sourcePort, note, 0, false);
     noteArpOffPassthrough(sourcePort, note, 0, false);
   }
 
@@ -2366,7 +2392,7 @@ void updateSensorOutput() {
   if (!channelEnabled(ch)) return;
 
   if (!sensorRt.inRange) {
-    if (mode == SENSOR_ARP_LATCH) arpLatchSensorClose = false;
+    if (mode == SENSOR_ARP_LATCH || mode == SENSOR_ARP_LATCH_PLUS) arpLatchSensorClose = false;
     if (sensorRt.activeNote >= 0) {
       sendFanout(253, 0x80 | ((ch - 1) & 0x0F), sensorRt.activeNote, 0);
       sensorRt.activeNote = -1;
@@ -2386,7 +2412,7 @@ void updateSensorOutput() {
   const int rel = constrain(SENSOR_ACTIVE_MAX_MM - sensorRt.mm, 0, span);
   const uint8_t pct = map(rel, 0, span, 0, 100);
 
-  if (mode == SENSOR_ARP_LATCH) {
+  if (mode == SENSOR_ARP_LATCH || mode == SENSOR_ARP_LATCH_PLUS) {
     const bool closeHalf = sensorRt.mm < ((VL53_VALID_MIN_MM + SENSOR_ACTIVE_MAX_MM) / 2);
     if (closeHalf && !arpLatchSensorClose) {
       clearArpLatchNotes();
