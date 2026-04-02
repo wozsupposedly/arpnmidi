@@ -103,12 +103,14 @@ constexpr uint8_t MAX_HELD_NOTES = 32;
 constexpr uint8_t MAX_ARP_OUTPUT_NOTES = 8;
 constexpr uint8_t PRESET_COUNT = 16;
 constexpr uint8_t DIV_NOTE_SLOT_COUNT = 9;
+constexpr uint8_t DIV_NOTE_PLUS_SLOT = DIV_NOTE_SLOT_COUNT;
+constexpr uint8_t DIV_NOTE_RESET_SLOT = DIV_NOTE_SLOT_COUNT + 1;
 constexpr uint8_t MAX_USB_MIDI_DEVICES = 8;
 constexpr uint16_t USB_MSG_QUEUE_SIZE = 192;
 constexpr uint8_t USB_MSG_HIGH_WATER = USB_MSG_QUEUE_SIZE - 24;
 constexpr uint8_t USB_MSG_CRITICAL_WATER = USB_MSG_QUEUE_SIZE - 8;
 constexpr uint8_t USB_TX_QUEUE_SIZE = 128;
-constexpr uint16_t EEPROM_MAGIC = 0x4D42;
+constexpr uint16_t EEPROM_MAGIC = 0x4D43;
 constexpr size_t EEPROM_BYTES = 2048;
 
 decltype(Serial1) &DinSerial = Serial1;
@@ -327,6 +329,7 @@ struct Settings {
   uint8_t screenSaver;
   uint8_t divNoteChannels[DIV_NOTE_SLOT_COUNT];
   uint8_t divNoteNotes[DIV_NOTE_SLOT_COUNT];
+  uint8_t divNotePlusNote;
 };
 
 struct StorageImage {
@@ -1336,7 +1339,7 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_ARP_OUT_CH: return 20;
     case SET_BASS_CH: return 48;
     case SET_THRU_OUT_CH: return 16;
-    case SET_DIV_NOTES: return DIV_NOTE_SLOT_COUNT;
+    case SET_DIV_NOTES: return DIV_NOTE_RESET_SLOT;
     case SET_CC_OUT_CH: return 17;
     case SET_REMOTE_CH: return 16;
     case SET_SENSOR_CH: return 16;
@@ -1403,7 +1406,7 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
       break;
     case SET_BASS_CH: settings.bassMode = clampU8(value, 0, 48); break;
     case SET_THRU_OUT_CH: settings.thruOutChannel = clampU8(value, 0, 16); break;
-    case SET_DIV_NOTES: divNotesCursor = clampU8(value, 0, DIV_NOTE_SLOT_COUNT); break;
+    case SET_DIV_NOTES: divNotesCursor = clampU8(value, 0, DIV_NOTE_RESET_SLOT); break;
     case SET_CC_OUT_CH: settings.ccOutChannel = clampU8(value, 1, 17); break;
     case SET_REMOTE_CH: settings.remoteChannel = clampU8(value, 1, 16); break;
     case SET_SENSOR_CH: settings.sensorChannel = clampU8(value, 1, 16); break;
@@ -1487,11 +1490,11 @@ Settings defaultSettings() {
   s.arpLengthPct = 55;
   s.pattern = PAT_MODE;
   s.inputChannel = 1;
-  s.arpOutChannel = 1;
+  s.arpOutChannel = 17;
   s.bassMode = 0;
   s.thruOutChannel = 2;
   s.ccOutChannel = 17;
-  s.remoteChannel = 10;
+  s.remoteChannel = 16;
   s.sensorChannel = 3;
   s.sensorMode = SENSOR_OFF;
   s.forceKey = 0;
@@ -1507,6 +1510,7 @@ Settings defaultSettings() {
     s.divNoteChannels[i] = 0;
     s.divNoteNotes[i] = 0xFF;
   }
+  s.divNotePlusNote = 0xFF;
   return s;
 }
 
@@ -1709,13 +1713,15 @@ bool captureDivNoteAssignment(uint8_t channel1, uint8_t note, bool on) {
   if (divNotesCursor < DIV_NOTE_SLOT_COUNT) {
     settings.divNoteChannels[divNotesCursor] = channel1;
     settings.divNoteNotes[divNotesCursor] = note;
+  } else if (divNotesCursor == DIV_NOTE_PLUS_SLOT) {
+    settings.divNotePlusNote = note;
   }
   ui.dirty = true;
   markActivity(false);
   return true;
 }
 
-bool handleDivNoteOverride(uint8_t channel1, uint8_t note, bool on) {
+bool handleDivNoteOverride(uint8_t channel1, uint8_t &note, bool on) {
   for (uint8_t i = 0; i < DIV_NOTE_SLOT_COUNT; ++i) {
     if (settings.divNoteChannels[i] == channel1 && settings.divNoteNotes[i] == note) {
       divNoteHeld[i] = on;
@@ -1723,6 +1729,10 @@ bool handleDivNoteOverride(uint8_t channel1, uint8_t note, bool on) {
       arpNextStepMs = millis();
       arpGateOffMs = 0;
       markActivity(false);
+      if (settings.divNotePlusNote != 0xFF) {
+        note = settings.divNotePlusNote;
+        return false;
+      }
       return true;
     }
   }
@@ -1792,9 +1802,9 @@ void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t vel
 
 void handleDinNoteOn(byte channel, byte pitch, byte velocity) {
   if (captureDivNoteAssignment(channel, pitch, velocity > 0)) return;
-  if (handleDivNoteOverride(channel, pitch, velocity > 0)) return;
   uint8_t ch = channel;
   uint8_t note = pitch;
+  if (handleDivNoteOverride(ch, note, velocity > 0)) return;
   translateSplitInputToDrum(ch, note);
   onInputNote(0, ch, note, velocity, velocity > 0);
 }
@@ -1802,9 +1812,9 @@ void handleDinNoteOn(byte channel, byte pitch, byte velocity) {
 void handleDinNoteOff(byte channel, byte pitch, byte velocity) {
   (void)velocity;
   if (captureDivNoteAssignment(channel, pitch, false)) return;
-  if (handleDivNoteOverride(channel, pitch, false)) return;
   uint8_t ch = channel;
   uint8_t note = pitch;
+  if (handleDivNoteOverride(ch, note, false)) return;
   translateSplitInputToDrum(ch, note);
   onInputNote(0, ch, note, 0, false);
 }
@@ -2559,7 +2569,8 @@ String settingValueString(uint8_t id) {
     case SET_BASS_CH: return bassLabel(v);
     case SET_THRU_OUT_CH: return midiChannelLabel(v, true);
     case SET_DIV_NOTES:
-      if (v >= DIV_NOTE_SLOT_COUNT) return "RESET";
+      if (v == DIV_NOTE_PLUS_SLOT) return "+NOTE";
+      if (v >= DIV_NOTE_RESET_SLOT) return "RESET";
       return kDivisionNames[divNoteSlotToDivision(v)];
     case SET_CC_OUT_CH: return ccChannelLabel(v);
     case SET_REMOTE_CH: return midiChannelLabel(v);
@@ -2874,7 +2885,23 @@ void drawDivNotesScreen(uint8_t cursor) {
   display.setTextSize(2);
   display.setCursor(0, 0);
   display.print(F("DIV NOTES"));
-  if (cursor >= DIV_NOTE_SLOT_COUNT) {
+  if (cursor == DIV_NOTE_PLUS_SLOT) {
+    display.setTextSize(2);
+    display.setCursor(0, 18);
+    display.print(F("+NOTE"));
+    display.setTextSize(1);
+    display.setCursor(0, 38);
+    if (settings.divNotePlusNote == 0xFF) {
+      display.print(F("BLANK"));
+    } else {
+      display.print(kNoteNames[settings.divNotePlusNote % 12]);
+      display.print(settings.divNotePlusNote / 12);
+      display.print(F(" "));
+      display.print(settings.divNotePlusNote);
+    }
+    return;
+  }
+  if (cursor >= DIV_NOTE_RESET_SLOT) {
     display.setTextSize(3);
     display.setCursor(0, 18);
     display.print(F("RESET"));
@@ -3092,13 +3119,14 @@ void processDeferredUiActions() {
       setSettingValueRaw(ui.pendingSetting, ui.pendingValue);
       ui.hasPendingEdit = false;
     }
-    if (ui.selectedSetting == SET_DIV_NOTES && divNotesCursor >= DIV_NOTE_SLOT_COUNT) {
+    if (ui.selectedSetting == SET_DIV_NOTES && divNotesCursor >= DIV_NOTE_RESET_SLOT) {
       for (uint8_t i = 0; i < DIV_NOTE_SLOT_COUNT; ++i) {
         settings.divNoteChannels[i] = 0;
         settings.divNoteNotes[i] = 0xFF;
         divNoteHeld[i] = false;
         divNoteHeldStamp[i] = 0;
       }
+      settings.divNotePlusNote = 0xFF;
       divNotePressCounter = 0;
       ui.dirty = true;
     }
