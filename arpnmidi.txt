@@ -609,7 +609,11 @@ bool arpChannelSplitMode() {
 }
 
 uint8_t splitDrumStartNote() {
-  return (settings.arpOutChannel == 19) ? 9 : 24;
+  return (settings.arpOutChannel == 19) ? 24 : 36;
+}
+
+uint8_t splitDrumOutputNote(uint8_t note) {
+  return (settings.arpOutChannel == 19) ? static_cast<uint8_t>(note + 12) : note;
 }
 
 uint8_t mainArpOutChannel() {
@@ -688,8 +692,8 @@ bool settingNeedsPanic(uint8_t settingId) {
 String midiChannelLabel(uint8_t value, bool allowOff = false) {
   if (allowOff && value == 0) return "OFF";
   if (value == 17) return "1+10";
-  if (value == 18) return "1-10 24";
-  if (value == 19) return "1-10 9";
+  if (value == 18) return "1-10 36";
+  if (value == 19) return "1-10 24";
   return "CH " + String(value);
 }
 
@@ -870,9 +874,27 @@ void panicMidiOnly() {
   sensorRt.activeNote = -1;
 }
 
+void resetUsbDebugCounters() {
+  usbLastRxIdx = 0xFF;
+  usbLastRxMs = 0;
+  usbSoftDropCount = 0;
+  usbCriticalDropCount = 0;
+  splitNoteHitCount = 0;
+  splitLastNote = 0xFF;
+  debugLastInputCh = 0xFF;
+  debugLastInputNote = 0xFF;
+  splitCandidateCount = 0;
+  drumOutHitCount = 0;
+  drumLastOutNote = 0xFF;
+  usbHostNoteHitCount = 0;
+  usbHostLastInputCh = 0xFF;
+  usbHostLastInputNote = 0xFF;
+}
+
 void panicAll() {
   panicMidiOnly();
   resetHeldState();
+  resetUsbDebugCounters();
   usbMsgHead = 0;
   usbMsgTail = 0;
   usbTxHead = 0;
@@ -1245,7 +1267,10 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
     case SET_LENGTH: settings.arpLengthPct = clampU8(value, 1, 100); break;
     case SET_PATTERN: settings.pattern = clampU8(value, 0, PATTERN_COUNT - 1); break;
     case SET_INPUT_CH: settings.inputChannel = clampU8(value, 1, 16); break;
-    case SET_ARP_OUT_CH: settings.arpOutChannel = clampU8(value, 0, 19); break;
+    case SET_ARP_OUT_CH:
+      settings.arpOutChannel = clampU8(value, 0, 19);
+      resetUsbDebugCounters();
+      break;
     case SET_BASS_CH: settings.bassMode = clampU8(value, 0, 48); break;
     case SET_THRU_OUT_CH: settings.thruOutChannel = clampU8(value, 0, 16); break;
     case SET_REMOTE_CH: settings.remoteChannel = clampU8(value, 1, 16); break;
@@ -1499,50 +1524,52 @@ void pollEncoder() {
   }
 }
 
+void handleDrumInputNote(uint8_t sourcePort, uint8_t note, uint8_t velocity, bool on) {
+  markActivity(false);
+  if (liveNoteViewActive() || ui.selectedSetting == SET_PANIC) ui.dirty = true;
+
+  if (currentArpSelection() == ARPSEL_OFF) {
+    if (on && velocity > 0) sendFanout(sourcePort, 0x90 | (10 - 1), note, 127);
+    else sendFanout(sourcePort, 0x80 | (10 - 1), note, 0);
+    heldDrumNotes[note] = false;
+    heldDrumVelocities[note] = 0;
+    rebuildHeldDrumCount();
+    return;
+  }
+
+  const bool hadNoDrumKeys = (heldDrumCount == 0);
+  heldDrumNotes[note] = on && velocity > 0;
+  heldDrumVelocities[note] = (on && velocity > 0) ? velocity : 0;
+  rebuildHeldDrumCount();
+  if (on && velocity > 0 && hadNoDrumKeys) {
+    restartArpTiming(false);
+  }
+}
+
+bool translateSplitInputToDrum(uint8_t &channel1, uint8_t &note) {
+  if (channel1 != settings.inputChannel) return false;
+  if (!arpChannelSplitMode()) return false;
+  if (!splitDrumInputNote(note)) return false;
+
+  splitCandidateCount++;
+  splitNoteHitCount++;
+  splitLastNote = note;
+  channel1 = 10;
+  note = splitDrumOutputNote(note);
+  return true;
+}
+
 void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t velocity, bool on) {
   debugLastInputCh = channel1;
   debugLastInputNote = note;
 
   if (arpChannelSpecialMode() && channel1 == 10) {
-    markActivity(false);
-    if (liveNoteViewActive()) ui.dirty = true;
-    heldDrumNotes[note] = on && velocity > 0;
-    heldDrumVelocities[note] = (on && velocity > 0) ? velocity : 0;
-    rebuildHeldDrumCount();
+    handleDrumInputNote(sourcePort, note, velocity, on);
     return;
   }
 
   if (channel1 != settings.inputChannel) {
     sendFanout(sourcePort, (on ? 0x90 : 0x80) | ((channel1 - 1) & 0x0F), note, velocity);
-    return;
-  }
-
-  if (arpChannelSplitMode() && splitDrumInputNote(note)) {
-    splitCandidateCount++;
-    markActivity(false);
-    if (liveNoteViewActive()) ui.dirty = true;
-    splitNoteHitCount++;
-    splitLastNote = note;
-    clearSplitNoteFromMainPaths(sourcePort, note);
-    if (currentArpSelection() == ARPSEL_OFF) {
-      if (on && velocity > 0) {
-        sendFanout(sourcePort, 0x90 | (10 - 1), note, 127);
-      } else {
-        sendFanout(sourcePort, 0x80 | (10 - 1), note, 0);
-      }
-      heldDrumNotes[note] = false;
-      heldDrumVelocities[note] = 0;
-      rebuildHeldDrumCount();
-      return;
-    }
-
-    const bool hadNoDrumKeys = (heldDrumCount == 0);
-    heldDrumNotes[note] = on && velocity > 0;
-    heldDrumVelocities[note] = (on && velocity > 0) ? velocity : 0;
-    rebuildHeldDrumCount();
-    if (on && velocity > 0 && hadNoDrumKeys) {
-      restartArpTiming(false);
-    }
     return;
   }
 
@@ -1580,12 +1607,18 @@ void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t vel
 }
 
 void handleDinNoteOn(byte channel, byte pitch, byte velocity) {
-  onInputNote(0, channel, pitch, velocity, velocity > 0);
+  uint8_t ch = channel;
+  uint8_t note = pitch;
+  translateSplitInputToDrum(ch, note);
+  onInputNote(0, ch, note, velocity, velocity > 0);
 }
 
 void handleDinNoteOff(byte channel, byte pitch, byte velocity) {
   (void)velocity;
-  onInputNote(0, channel, pitch, 0, false);
+  uint8_t ch = channel;
+  uint8_t note = pitch;
+  translateSplitInputToDrum(ch, note);
+  onInputNote(0, ch, note, 0, false);
 }
 
 void routeControlChange(uint8_t sourcePort, byte channel, byte control, byte value) {
@@ -1626,10 +1659,12 @@ void handleDinClock() {
 #if ARPNMIDI_ENABLE_USB_HOST
 void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2) {
   const uint8_t type = status & 0xF0;
-  const uint8_t channel = (status & 0x0F) + 1;
+  uint8_t channel = (status & 0x0F) + 1;
   if (type == 0x90) {
+    translateSplitInputToDrum(channel, data1);
     onInputNote(sourcePort, channel, data1, data2, data2 > 0);
   } else if (type == 0x80) {
+    translateSplitInputToDrum(channel, data1);
     onInputNote(sourcePort, channel, data1, 0, false);
   } else if (type == 0xB0) {
     routeControlChange(sourcePort, channel, data1, data2);
@@ -1762,6 +1797,7 @@ bool enqueueUsbMidiPacket(uint8_t sourcePort, const uint8_t packet[4]) {
     usbHostNoteHitCount++;
     usbHostLastInputCh = (status & 0x0F) + 1;
     usbHostLastInputNote = data1;
+    if (ui.selectedSetting == SET_PANIC) usbUiDirty = true;
   }
   return enqueueUsbMessage(sourcePort, status, data1, data2);
 }
@@ -2553,11 +2589,11 @@ void drawChannelScreen(const __FlashStringHelper *title, int channel, bool allow
   } else if (channel == 18) {
     display.setTextSize(3);
     display.setCursor(0, 18);
-    display.print(F("1-10 24"));
+    display.print(F("1-10 36"));
   } else if (channel == 19) {
     display.setTextSize(3);
     display.setCursor(0, 18);
-    display.print(F("1-10 9"));
+    display.print(F("1-10 24"));
   } else {
     display.setTextSize(3);
     display.setCursor(0, 18);
