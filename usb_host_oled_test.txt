@@ -1,0 +1,148 @@
+/*
+  usb_host_oled_test.txt
+  Minimal RP2040 Zero USB host enumeration test with OLED status.
+
+  Wiring:
+  2   I2C SDA for SSD1306
+  3   I2C SCL for SSD1306
+  14  USB host D+
+  15  USB host D-
+
+  Build notes:
+  - Arduino-Pico core
+  - Tools -> USB Stack = Adafruit TinyUSB
+  - CPU speed = 120 MHz or 240 MHz
+  - Pico-PIO-USB installed
+*/
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_TinyUSB.h>
+#include "pio_usb_configuration.h"
+#include "pio_usb.h"
+
+constexpr uint8_t PIN_I2C_SDA = 2;
+constexpr uint8_t PIN_I2C_SCL = 3;
+constexpr uint8_t PIN_USB_HOST_DP = 14;
+constexpr uint8_t PIN_USB_HOST_DM = 15;
+constexpr uint8_t OLED_ADDR = 0x3C;
+constexpr uint8_t SCREEN_W = 128;
+constexpr uint8_t SCREEN_H = 64;
+
+Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire1, -1);
+Adafruit_USBH_Host USBHost;
+
+volatile uint32_t usbMountCount = 0;
+volatile uint32_t usbUnmountCount = 0;
+volatile uint8_t lastMountedAddr = 0;
+volatile uint8_t lastUnmountedAddr = 0;
+volatile uint32_t lastEventMs = 0;
+volatile bool usbDirty = true;
+
+void drawStatus() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.print(F("USB HOST"));
+
+  display.setTextSize(1);
+  display.setCursor(0, 20);
+  display.print(F("D+ 14  D- 15"));
+
+  display.setTextSize(2);
+  display.setCursor(0, 30);
+  display.print(F("IN "));
+  display.print(static_cast<uint32_t>(usbMountCount));
+
+  display.setCursor(0, 48);
+  display.print(F("OUT "));
+  display.print(static_cast<uint32_t>(usbUnmountCount));
+
+  display.setTextSize(1);
+  display.setCursor(82, 30);
+  display.print(F("A "));
+  display.print(static_cast<uint8_t>(lastMountedAddr));
+
+  display.setCursor(82, 40);
+  display.print(F("R "));
+  display.print(static_cast<uint8_t>(lastUnmountedAddr));
+
+  display.setCursor(82, 50);
+  display.print(F("MS "));
+  display.print(static_cast<uint32_t>(lastEventMs));
+
+  display.display();
+}
+
+void setupDisplay() {
+  Wire1.setSDA(PIN_I2C_SDA);
+  Wire1.setSCL(PIN_I2C_SCL);
+  Wire1.begin();
+  Wire1.setClock(400000);
+
+  display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  display.setRotation(2);
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.display();
+}
+
+void setupUsbHost() {
+  const uint32_t cpu_hz = clock_get_hz(clk_sys);
+  if (cpu_hz % 12000000UL) {
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setCursor(0, 0);
+    display.print(F("BAD CPU"));
+    display.setTextSize(1);
+    display.setCursor(0, 24);
+    display.print(cpu_hz);
+    display.display();
+    while (1) delay(1);
+  }
+
+  pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
+  pio_cfg.pin_dp = PIN_USB_HOST_DP;
+  USBHost.configure_pio_usb(1, &pio_cfg);
+}
+
+void setup() {
+  delay(300);
+  setupDisplay();
+  drawStatus();
+}
+
+void loop() {
+  if (usbDirty) {
+    noInterrupts();
+    usbDirty = false;
+    interrupts();
+    drawStatus();
+  }
+}
+
+void setup1() {
+  setupUsbHost();
+  USBHost.begin(1);
+}
+
+void loop1() {
+  USBHost.task();
+}
+
+void tuh_mount_cb(uint8_t daddr) {
+  usbMountCount++;
+  lastMountedAddr = daddr;
+  lastEventMs = millis();
+  usbDirty = true;
+}
+
+void tuh_umount_cb(uint8_t daddr) {
+  usbUnmountCount++;
+  lastUnmountedAddr = daddr;
+  lastEventMs = millis();
+  usbDirty = true;
+}

@@ -35,7 +35,6 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <EEPROM.h>
-#include <hardware/watchdog.h>
 #include <MIDI.h>
 #if ARPNMIDI_ENABLE_RGB_LED
 #include <Adafruit_NeoPixel.h>
@@ -103,10 +102,7 @@ constexpr uint8_t MAX_HELD_NOTES = 32;
 constexpr uint8_t MAX_ARP_OUTPUT_NOTES = 8;
 constexpr uint8_t PRESET_COUNT = 16;
 constexpr uint8_t MAX_USB_MIDI_DEVICES = 8;
-constexpr uint16_t USB_MSG_QUEUE_SIZE = 192;
-constexpr uint8_t USB_MSG_HIGH_WATER = USB_MSG_QUEUE_SIZE - 24;
-constexpr uint8_t USB_MSG_CRITICAL_WATER = USB_MSG_QUEUE_SIZE - 8;
-constexpr uint8_t USB_TX_QUEUE_SIZE = 128;
+constexpr uint8_t USB_MSG_QUEUE_SIZE = 64;
 constexpr uint16_t EEPROM_MAGIC = 0x4D41;
 constexpr size_t EEPROM_BYTES = 2048;
 
@@ -120,10 +116,6 @@ Adafruit_NeoPixel onboardRgb(1, PIN_RGB_LED, NEO_GRB + NEO_KHZ800);
 #if ARPNMIDI_ENABLE_USB_HOST
 Adafruit_USBH_Host USBHost;
 #endif
-
-void showBootStage(const __FlashStringHelper *line1,
-                   const __FlashStringHelper *line2 = nullptr);
-[[noreturn]] void panicAndRestartHost();
 
 enum MenuMode : uint8_t {
   MENU_SELECT = 0,
@@ -151,17 +143,9 @@ enum SettingId : uint8_t {
   SET_REMOTE2,
   SET_LOAD_PRESET,
   SET_SAVE_PRESET,
-  SET_USB_HOST_MODE,
   SET_SCREEN_SAVER,
   SET_PANIC,
   SETTING_COUNT
-};
-
-enum UsbHostModeId : uint8_t {
-  USB_HOST_OFF = 0,
-  USB_HOST_IN_ONLY,
-  USB_HOST_IN_OUT,
-  USB_HOST_MODE_COUNT
 };
 
 enum ArpMode : uint8_t {
@@ -173,24 +157,6 @@ enum ArpMode : uint8_t {
   ARP_RANDOM,
   ARP_OFF,
   ARP_MODE_COUNT
-};
-
-enum ArpSelection : uint8_t {
-  ARPSEL_OFF = 0,
-  ARPSEL_UP,
-  ARPSEL_DOWN,
-  ARPSEL_UPDOWN1,
-  ARPSEL_UPDOWN2,
-  ARPSEL_TRIGGER,
-  ARPSEL_RANDOM,
-  ARPSEL_PAT_UP_1OCT,
-  ARPSEL_PAT_RHYTHM,
-  ARPSEL_PAT_OSTINATO,
-  ARPSEL_PAT_OCTAVE_WALK,
-  ARPSEL_PAT_FIFTH,
-  ARPSEL_PAT_BASS_CHORD,
-  ARPSEL_PAT_CHORD_RUN,
-  ARP_SELECTION_COUNT
 };
 
 enum DivisionId : uint8_t {
@@ -246,8 +212,6 @@ enum SensorModeId : uint8_t {
   SENSOR_PARAM_PLUS3,
   SENSOR_PARAM_MINUS3,
   SENSOR_PARAM_FULL,
-  SENSOR_VEL_DOWN,
-  SENSOR_LEN_DOWN,
   SENSOR_PITCH_UP,
   SENSOR_PITCH_DOWN,
   SENSOR_NOTES_C0,
@@ -314,7 +278,6 @@ struct Settings {
   uint8_t remote2Action;
   uint8_t loadPreset;
   uint8_t savePreset;
-  uint8_t usbHostMode;
   uint8_t screenSaver;
 };
 
@@ -338,6 +301,13 @@ struct UsbMidiDevice {
   uint8_t daddr = 0;
   uint8_t rxCableCount = 0;
   uint8_t txCableCount = 0;
+};
+
+struct UsbMidiParser {
+  uint8_t runningStatus = 0;
+  uint8_t data[2] = {0, 0};
+  uint8_t needed = 0;
+  uint8_t have = 0;
 };
 
 struct UsbQueuedMessage {
@@ -408,44 +378,19 @@ volatile uint32_t usbLastRxMs = 0;
 volatile bool usbUiDirty = false;
 volatile bool usbHostStartRequested = false;
 volatile bool usbHostStarted = false;
-volatile bool usbMsgCriticalOverflow = false;
-volatile bool usbParserResetRequested = false;
 volatile uint8_t usbMsgHead = 0;
 volatile uint8_t usbMsgTail = 0;
 UsbQueuedMessage usbMsgQueue[USB_MSG_QUEUE_SIZE];
-volatile uint8_t usbTxHead = 0;
-volatile uint8_t usbTxTail = 0;
-UsbQueuedMessage usbTxQueue[USB_TX_QUEUE_SIZE];
-volatile uint16_t usbSoftDropCount = 0;
-volatile uint16_t usbCriticalDropCount = 0;
-volatile uint16_t splitNoteHitCount = 0;
-volatile uint8_t splitLastNote = 0xFF;
-volatile uint8_t debugLastInputCh = 0xFF;
-volatile uint8_t debugLastInputNote = 0xFF;
-volatile uint16_t splitCandidateCount = 0;
-volatile uint16_t drumOutHitCount = 0;
-volatile uint8_t drumLastOutNote = 0xFF;
-volatile uint16_t usbHostNoteHitCount = 0;
-volatile uint8_t usbHostLastInputCh = 0xFF;
-volatile uint8_t usbHostLastInputNote = 0xFF;
 
 bool heldInputNotes[128];
 uint8_t heldVelocities[128];
-bool heldDrumNotes[128];
-uint8_t heldDrumVelocities[128];
 uint8_t mappedThruNotes[128];
-uint8_t mappedArpOffNotes[128];
-uint8_t thruOutputRefCount[128];
-uint8_t arpOffOutputRefCount[128];
 uint8_t heldSorted[MAX_HELD_NOTES];
 uint8_t heldCount = 0;
-uint8_t heldDrumCount = 0;
 int8_t currentBassSource = -1;
 int8_t currentBassOutNote = -1;
 int8_t activeArpNotes[MAX_ARP_OUTPUT_NOTES];
 uint8_t activeArpCount = 0;
-int8_t activeDrumArpNotes[MAX_HELD_NOTES];
-uint8_t activeDrumArpCount = 0;
 uint32_t arpNextStepMs = 0;
 uint32_t arpGateOffMs = 0;
 int8_t arpModeCursor = 0;
@@ -455,6 +400,7 @@ bool arpHadKeys = false;
 bool screenSaverSeeded = false;
 bool screenSaverForceNow = false;
 UsbMidiDevice usbMidiDevices[MAX_USB_MIDI_DEVICES];
+UsbMidiParser usbMidiParsers[MAX_USB_MIDI_DEVICES];
 const int8_t kEncoderTransitionTable[16] = {
   0,  1, -1,  0,
  -1,  0,  0,  1,
@@ -463,21 +409,15 @@ const int8_t kEncoderTransitionTable[16] = {
 };
 
 const char *const kSettingNames[SETTING_COUNT] = {
-  "1 BPM", "2 ARP MODE", "3 DIVISION", "4 VELOCITY", "5 LENGTH", "",
-  "6 INPUT CH", "7 ARP CH", "8 BASS CH", "9 THRU OUT", "10 REMOTE",
-  "11 EYE CH", "12 EYE MODE", "13 KEY", "14 SCALE",
-  "15 GIT/KEYS", "16 REMOTE 1", "17 REMOTE 2", "18 LOAD",
-  "19 SAVE", "20 USB HOST", "21 SCRNSVR", "22 PANIC"
+  "1 BPM", "2 ARP MODE", "3 DIVISION", "4 VELOCITY", "5 LENGTH", "6 PATTERN",
+  "7 INPUT CH", "8 ARP CH", "9 BASS CH", "10 THRU OUT CH", "11 REMOTE",
+  "12 EYE CH", "13 EYE MODE", "14 KEY", "15 SCALE",
+  "16 GIT/KEYS", "17 REMOTE 1", "18 REMOTE 2", "19 LOAD",
+  "20 SAVE", "21 SCRNSVR", "22 PANIC"
 };
 
 const char *const kArpModeNames[ARP_MODE_COUNT] = {
   "UP", "DOWN", "UP-DOWN 1", "UP-DOWN 2", "TRIGGER", "RANDOM", "OFF"
-};
-
-const char *const kArpSelectionNames[ARP_SELECTION_COUNT] = {
-  "OFF", "UP", "DOWN", "UP-DOWN 1", "UP-DOWN 2", "TRIGGER", "RANDOM",
-  "UP 1-OCT",
-  "RHYTHM", "OSTINATO", "OCT WALK", "FIFTH", "BASS+CHORD", "CHORD+RUN"
 };
 
 const char *const kDivisionNames[DIVISION_COUNT] = {
@@ -501,16 +441,12 @@ const char *const kForceScaleNames[FORCE_SCALE_COUNT] = {
 };
 
 const char *const kSensorModeNames[SENSOR_MODE_COUNT] = {
-  "OFF", "DIV +2", "DIV -2", "DIV +3", "DIV -3", "DIV FULL",
-  "VEL DOWN", "LEN DOWN", "PITCH UP", "PITCH DOWN", "NOTES C0", "NOTES C1", "NOTES C2", "NOTES C3",
+  "OFF", "PARAM +2", "PARAM -2", "PARAM +3", "PARAM -3", "PARAM FULL",
+  "PITCH UP", "PITCH DOWN", "NOTES C0", "NOTES C1", "NOTES C2", "NOTES C3",
   "NOTES C4", "NOTES C5", "NOTES C6", "NOTES C7",
   "CC 1", "CC 2", "CC 3", "CC 4", "CC 5", "CC 6", "CC 7", "CC 8", "CC 9",
   "CC 10", "CC 11", "CC 12", "CC 13", "CC 14", "CC 15", "CC 16", "CC 17", "CC 18", "CC 19",
   "LOOP TRIG"
-};
-
-const char *const kUsbHostModeNames[USB_HOST_MODE_COUNT] = {
-  "OFF", "IN ONLY", "IN/OUT"
 };
 
 const char *const kNoteNames[12] = {
@@ -592,57 +528,13 @@ bool channelEnabled(uint8_t chSetting) {
   return chSetting >= 1 && chSetting <= 16;
 }
 
-bool arpChannelSpecialMode() {
-  return settings.arpOutChannel >= 17;
-}
-
-bool usbHostEnabled() {
-  return settings.usbHostMode != USB_HOST_OFF;
-}
-
-bool usbHostOutputEnabled() {
-  return settings.usbHostMode == USB_HOST_IN_OUT;
-}
-
-bool arpChannelSplitMode() {
-  return settings.arpOutChannel == 18 || settings.arpOutChannel == 19;
-}
-
-uint8_t splitDrumStartNote() {
-  return (settings.arpOutChannel == 19) ? 9 : 24;
-}
-
-uint8_t mainArpOutChannel() {
-  return arpChannelSpecialMode() ? 1 : settings.arpOutChannel;
-}
-
-bool splitDrumInputNote(uint8_t note) {
-  const uint8_t start = splitDrumStartNote();
-  return note >= start && note < static_cast<uint8_t>(start + 8);
-}
-
-bool selectableSetting(uint8_t settingId) {
-  return settingId != SET_PATTERN;
-}
-
-uint8_t advanceSelectableSetting(uint8_t current, int delta) {
-  uint8_t next = current;
-  do {
-    int value = static_cast<int>(next) + delta;
-    while (value < 0) value += SETTING_COUNT;
-    while (value >= SETTING_COUNT) value -= SETTING_COUNT;
-    next = static_cast<uint8_t>(value);
-  } while (!selectableSetting(next));
-  return next;
-}
-
-bool liveNoteViewActive() {
-  return ui.selectedSetting == SET_FORCE_KEY ||
-         ui.selectedSetting == SET_FORCE_SCALE ||
-         ui.selectedSetting == SET_GUITAR_PIANO;
-}
-
 uint16_t currentBpm() {
+  if ((millis() - clockTracker.lastDinClockMs) < 2000UL) {
+    return constrain(static_cast<int>(clockTracker.bpm + 0.5f), 20, 300);
+  }
+  if ((millis() - clockTracker.lastUsbClockMs) < 2000UL) {
+    return constrain(static_cast<int>(clockTracker.bpm + 0.5f), 20, 300);
+  }
   return constrain(static_cast<int>(settings.manualBpm), 20, 300);
 }
 
@@ -673,7 +565,7 @@ void sendDinRaw2(uint8_t status, uint8_t data1) {
 }
 
 uint32_t divisionStepMs() {
-  const float quarterSteps = kDivisionQuarterSteps[currentDivisionSetting()];
+  const float quarterSteps = kDivisionQuarterSteps[settings.division];
   const float beatMs = 60000.0f / static_cast<float>(currentBpm());
   return static_cast<uint32_t>(beatMs * quarterSteps);
 }
@@ -687,9 +579,6 @@ bool settingNeedsPanic(uint8_t settingId) {
 
 String midiChannelLabel(uint8_t value, bool allowOff = false) {
   if (allowOff && value == 0) return "OFF";
-  if (value == 17) return "1+10";
-  if (value == 18) return "1-10 24";
-  if (value == 19) return "1-10 9";
   return "CH " + String(value);
 }
 
@@ -798,14 +687,14 @@ UsbMidiDevice *findUsbMidiDevice(uint8_t idx) {
 
 void sendMidiToUsbHosts(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2) {
 #if ARPNMIDI_ENABLE_USB_HOST
-  if (!usbHostOutputEnabled()) return;
-  const uint8_t next = static_cast<uint8_t>((usbTxHead + 1) % USB_TX_QUEUE_SIZE);
-  if (next == usbTxTail) return;
-  usbTxQueue[usbTxHead].sourcePort = sourcePort;
-  usbTxQueue[usbTxHead].status = status;
-  usbTxQueue[usbTxHead].data1 = data1;
-  usbTxQueue[usbTxHead].data2 = data2;
-  usbTxHead = next;
+  uint8_t msg[3] = {status, data1, data2};
+  const uint8_t len = 1 + midiMessageDataLength(status);
+  for (uint8_t i = 0; i < MAX_USB_MIDI_DEVICES; ++i) {
+    UsbMidiDevice &dev = usbMidiDevices[i];
+    if (!dev.mounted || dev.txCableCount == 0) continue;
+    if (sourcePort != 255 && sourcePort == usbPortFromIdx(dev.idx)) continue;
+    tuh_midi_stream_write(dev.idx, 0, msg, len);
+  }
 #else
   (void)sourcePort;
   (void)status;
@@ -850,56 +739,29 @@ void sendAllNoteOffChannel(uint8_t ch1) {
   sendFanout(255, 0xB0 | ((ch1 - 1) & 0x0F), 120, 0);
 }
 
-[[noreturn]] void rebootBoard(const __FlashStringHelper *reason = nullptr) {
-  showBootStage(F("Rebooting..."), reason);
-  delay(80);
-  watchdog_reboot(0, 0, 10);
-  while (true) delay(1);
-}
-
 void panicMidiOnly() {
-  if (channelEnabled(mainArpOutChannel())) sendAllNoteOffChannel(mainArpOutChannel());
-  if (arpChannelSpecialMode()) sendAllNoteOffChannel(10);
+  if (channelEnabled(settings.arpOutChannel)) sendAllNoteOffChannel(settings.arpOutChannel);
   if (channelEnabled(settings.thruOutChannel)) sendAllNoteOffChannel(settings.thruOutChannel);
   if (settings.bassMode > 0) sendAllNoteOffChannel(((settings.bassMode - 1) / 4) + 1);
   if (channelEnabled(settings.remoteChannel)) sendAllNoteOffChannel(settings.remoteChannel);
   if (channelEnabled(settings.sensorChannel)) sendAllNoteOffChannel(settings.sensorChannel);
   activeArpCount = 0;
-  activeDrumArpCount = 0;
   currentBassOutNote = -1;
   sensorRt.activeNote = -1;
 }
 
 void panicAll() {
   panicMidiOnly();
-  resetHeldState();
-  usbMsgHead = 0;
-  usbMsgTail = 0;
-  usbTxHead = 0;
-  usbTxTail = 0;
-  usbParserResetRequested = true;
   ui.menuMode = MENU_SELECT;
   ui.dirty = true;
   markActivity();
 }
 
-[[noreturn]] void panicAndRestartHost() {
-  panicAll();
-  if (usbHostEnabled()) rebootBoard(F("USB host"));
-  rebootBoard(F("Restart"));
-}
-
 void resetHeldState() {
   memset(heldInputNotes, 0, sizeof(heldInputNotes));
   memset(heldVelocities, 0, sizeof(heldVelocities));
-  memset(heldDrumNotes, 0, sizeof(heldDrumNotes));
-  memset(heldDrumVelocities, 0, sizeof(heldDrumVelocities));
   memset(mappedThruNotes, 0, sizeof(mappedThruNotes));
-  memset(mappedArpOffNotes, 0, sizeof(mappedArpOffNotes));
-  memset(thruOutputRefCount, 0, sizeof(thruOutputRefCount));
-  memset(arpOffOutputRefCount, 0, sizeof(arpOffOutputRefCount));
   heldCount = 0;
-  heldDrumCount = 0;
   arpModeCursor = 0;
   arpPatternStep = 0;
   arpPendulumUp = true;
@@ -907,7 +769,6 @@ void resetHeldState() {
   currentBassSource = -1;
   currentBassOutNote = -1;
   activeArpCount = 0;
-  activeDrumArpCount = 0;
 }
 
 bool noteInScale(uint8_t pc, uint8_t key, uint8_t scale) {
@@ -989,144 +850,15 @@ void updateBassVoice() {
   currentBassSource = nextSource;
   currentBassOutNote = nextOut;
   if (currentBassOutNote >= 0) {
-    sendFanout(255, 0x90 | ((bassChannel - 1) & 0x0F), currentBassOutNote, currentArpVelocitySetting());
+    sendFanout(255, 0x90 | ((bassChannel - 1) & 0x0F), currentBassOutNote, settings.arpVelocity);
   }
 }
 
 uint8_t effectiveThruChannel() {
   if (!channelEnabled(settings.thruOutChannel)) return 0;
+  if (settings.thruOutChannel == settings.arpOutChannel) return 0;
   if (settings.bassMode > 0 && settings.thruOutChannel == (((settings.bassMode - 1) / 4) + 1)) return 0;
   return settings.thruOutChannel;
-}
-
-uint8_t inputPerformanceOutChannel() {
-  return arpChannelSpecialMode() ? 1 : effectiveThruChannel();
-}
-
-uint8_t bassOutputChannel() {
-  return (settings.bassMode == 0) ? 0 : (((settings.bassMode - 1) / 4) + 1);
-}
-
-template <typename Fn>
-void forEachInputChannelOutput(Fn fn) {
-  uint8_t sent[3];
-  uint8_t sentCount = 0;
-
-  const uint8_t candidates[3] = {
-    mainArpOutChannel(),
-    effectiveThruChannel(),
-    bassOutputChannel()
-  };
-
-  for (uint8_t i = 0; i < 3; ++i) {
-    const uint8_t ch = candidates[i];
-    if (!channelEnabled(ch)) continue;
-    if (arpChannelSpecialMode() && ch == 10) continue;
-
-    bool duplicate = false;
-    for (uint8_t j = 0; j < sentCount; ++j) {
-      if (sent[j] == ch) {
-        duplicate = true;
-        break;
-      }
-    }
-    if (duplicate) continue;
-    sent[sentCount++] = ch;
-    fn(ch);
-  }
-}
-
-uint8_t currentArpSelection() {
-  return constrain(effectiveSettingValue(SET_ARP_MODE), 0, ARP_SELECTION_COUNT - 1);
-}
-
-uint8_t currentDivisionSetting() {
-  return constrain(effectiveSettingValue(SET_DIVISION), 0, DIVISION_COUNT - 1);
-}
-
-uint8_t currentArpVelocitySetting() {
-  const uint8_t base = constrain(getSettingValueRaw(SET_VELOCITY), 1, 127);
-  if (!sensorRt.inRange || settings.sensorMode != SENSOR_VEL_DOWN) return base;
-  const int span = SENSOR_ACTIVE_MAX_MM - VL53_VALID_MIN_MM;
-  const int rel = constrain(SENSOR_ACTIVE_MAX_MM - sensorRt.mm, 0, span);
-  return constrain(map(rel, 0, span, base, 1), 1, 127);
-}
-
-uint8_t currentArpLengthPctSetting() {
-  const uint8_t base = constrain(getSettingValueRaw(SET_LENGTH), 1, 100);
-  if (!sensorRt.inRange || settings.sensorMode != SENSOR_LEN_DOWN) return base;
-  const int span = SENSOR_ACTIVE_MAX_MM - VL53_VALID_MIN_MM;
-  const int rel = constrain(SENSOR_ACTIVE_MAX_MM - sensorRt.mm, 0, span);
-  return constrain(map(rel, 0, span, base, 1), 1, 100);
-}
-
-bool arpSelectionIsClassicMode(uint8_t sel) {
-  return sel <= ARPSEL_RANDOM;
-}
-
-uint8_t classicArpModeFromSelection(uint8_t sel) {
-  if (!arpSelectionIsClassicMode(sel)) return ARP_UP;
-  switch (sel) {
-    case ARPSEL_OFF: return ARP_OFF;
-    case ARPSEL_UP: return ARP_UP;
-    case ARPSEL_DOWN: return ARP_DOWN;
-    case ARPSEL_UPDOWN1: return ARP_UPDOWN1;
-    case ARPSEL_UPDOWN2: return ARP_UPDOWN2;
-    case ARPSEL_TRIGGER: return ARP_TRIGGER;
-    case ARPSEL_RANDOM: return ARP_RANDOM;
-    default: return ARP_UP;
-  }
-}
-
-uint8_t patternFromArpSelection(uint8_t sel) {
-  if (arpSelectionIsClassicMode(sel)) return PAT_MODE;
-  switch (sel) {
-    case ARPSEL_PAT_UP_1OCT: return PAT_UP_1OCT;
-    case ARPSEL_PAT_RHYTHM: return PAT_RHYTHM;
-    case ARPSEL_PAT_OSTINATO: return PAT_OSTINATO;
-    case ARPSEL_PAT_OCTAVE_WALK: return PAT_OCTAVE_WALK;
-    case ARPSEL_PAT_FIFTH: return PAT_FIFTH;
-    case ARPSEL_PAT_BASS_CHORD: return PAT_BASS_CHORD;
-    case ARPSEL_PAT_CHORD_RUN: return PAT_CHORD_RUN;
-    default: return PAT_MODE;
-  }
-}
-
-void rebuildHeldDrumCount() {
-  heldDrumCount = 0;
-  for (uint8_t note = 0; note < 128; ++note) {
-    if (heldDrumNotes[note]) heldDrumCount++;
-  }
-}
-
-void restartArpTiming(bool sendNoteOffs = true) {
-  if (sendNoteOffs) arpNoteOffs();
-  arpGateOffMs = 0;
-  arpNextStepMs = millis();
-  arpPatternStep = 0;
-  arpModeCursor = 0;
-  arpPendulumUp = true;
-}
-
-void noteArpOffPassthrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on) {
-  if (currentArpSelection() != ARPSEL_OFF) return;
-  const uint8_t outCh = (arpChannelSplitMode() && splitDrumInputNote(inNote)) ? 10 : mainArpOutChannel();
-  if (!channelEnabled(outCh)) return;
-  if (outCh == effectiveThruChannel()) return;
-  const bool drumSplit = arpChannelSplitMode() && splitDrumInputNote(inNote);
-  const uint8_t q = drumSplit ? inNote : quantizeUp(inNote);
-  mappedArpOffNotes[inNote] = q;
-  if (on) {
-    if (arpOffOutputRefCount[q]++ == 0) {
-      sendFanout(sourcePort, 0x90 | ((outCh - 1) & 0x0F), q, velocity);
-    }
-  } else {
-    const uint8_t out = mappedArpOffNotes[inNote];
-    if (arpOffOutputRefCount[out] > 0 && --arpOffOutputRefCount[out] == 0) {
-      sendFanout(sourcePort, 0x80 | ((outCh - 1) & 0x0F), out, 0);
-    }
-    mappedArpOffNotes[inNote] = 0;
-  }
 }
 
 void noteThrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on) {
@@ -1135,57 +867,51 @@ void noteThrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on) 
   if (on) {
     const uint8_t q = quantizeUp(inNote);
     mappedThruNotes[inNote] = q;
-    if (thruOutputRefCount[q]++ == 0) {
-      sendFanout(sourcePort, 0x90 | ((outCh - 1) & 0x0F), q, velocity);
-    }
+    sendFanout(sourcePort, 0x90 | ((outCh - 1) & 0x0F), q, velocity);
   } else {
     const uint8_t q = mappedThruNotes[inNote];
-    if (thruOutputRefCount[q] > 0 && --thruOutputRefCount[q] == 0) {
-      sendFanout(sourcePort, 0x80 | ((outCh - 1) & 0x0F), q, 0);
-    }
-    mappedThruNotes[inNote] = 0;
+    sendFanout(sourcePort, 0x80 | ((outCh - 1) & 0x0F), q, 0);
   }
-}
-
-void clearSplitNoteFromMainPaths(uint8_t sourcePort, uint8_t note) {
-  heldInputNotes[note] = false;
-  heldVelocities[note] = 0;
-
-  const uint8_t thruOut = mappedThruNotes[note];
-  const uint8_t thruCh = effectiveThruChannel();
-  if (thruOut > 0 && channelEnabled(thruCh) &&
-      thruOutputRefCount[thruOut] > 0 && --thruOutputRefCount[thruOut] == 0) {
-    sendFanout(sourcePort, 0x80 | ((thruCh - 1) & 0x0F), thruOut, 0);
-  }
-  mappedThruNotes[note] = 0;
-
-  const uint8_t arpOut = mappedArpOffNotes[note];
-  const uint8_t arpCh = mainArpOutChannel();
-  if (arpOut > 0 && channelEnabled(arpCh) &&
-      arpOffOutputRefCount[arpOut] > 0 && --arpOffOutputRefCount[arpOut] == 0) {
-    sendFanout(sourcePort, 0x80 | ((arpCh - 1) & 0x0F), arpOut, 0);
-  }
-  mappedArpOffNotes[note] = 0;
 }
 
 void handleClockByte(bool fromDin) {
-  (void)fromDin;
+  const uint32_t nowMicros = micros();
+  const uint32_t nowMs = millis();
+  if (fromDin) clockTracker.lastDinClockMs = nowMs;
+  else clockTracker.lastUsbClockMs = nowMs;
+  if (clockTracker.lastClockMicros != 0) {
+    clockTracker.pulseCount++;
+    if (clockTracker.pulseCount >= 24) {
+      const uint32_t dt = nowMicros - clockTracker.lastClockMicros;
+      if (dt > 0) {
+        clockTracker.bpm = 60000000.0f / static_cast<float>(dt);
+        ui.dirty = true;
+      }
+      clockTracker.lastClockMicros = nowMicros;
+      clockTracker.pulseCount = 0;
+    }
+  } else {
+    clockTracker.lastClockMicros = nowMicros;
+    clockTracker.pulseCount = 0;
+  }
 }
 
 bool sensorParamEligible(uint8_t settingId) {
-  return settingId == SET_DIVISION;
+  return settingId == SET_ARP_MODE || settingId == SET_DIVISION || settingId == SET_VELOCITY ||
+         settingId == SET_LENGTH || settingId == SET_ARP_OUT_CH || settingId == SET_FORCE_KEY ||
+         settingId == SET_FORCE_SCALE;
 }
 
 int16_t settingRangeMax(uint8_t settingId) {
   switch (settingId) {
     case SET_BPM: return 300;
-    case SET_ARP_MODE: return ARP_SELECTION_COUNT - 1;
+    case SET_ARP_MODE: return ARP_MODE_COUNT - 1;
     case SET_DIVISION: return DIVISION_COUNT - 1;
     case SET_VELOCITY: return 127;
     case SET_LENGTH: return 100;
     case SET_PATTERN: return PATTERN_COUNT - 1;
     case SET_INPUT_CH: return 16;
-    case SET_ARP_OUT_CH: return 19;
+    case SET_ARP_OUT_CH: return 16;
     case SET_BASS_CH: return 48;
     case SET_THRU_OUT_CH: return 16;
     case SET_REMOTE_CH: return 16;
@@ -1198,7 +924,6 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_REMOTE2: return 254;
     case SET_LOAD_PRESET: return PRESET_COUNT - 1;
     case SET_SAVE_PRESET: return PRESET_COUNT - 1;
-    case SET_USB_HOST_MODE: return USB_HOST_MODE_COUNT - 1;
     case SET_SCREEN_SAVER: return 2;
     default: return 0;
   }
@@ -1230,7 +955,6 @@ int16_t getSettingValueRaw(uint8_t settingId) {
     case SET_SAVE_PRESET:
       if (ui.menuMode == MENU_SELECT && ui.selectedSetting == SET_SAVE_PRESET) return storage.currentPreset;
       return settings.savePreset;
-    case SET_USB_HOST_MODE: return settings.usbHostMode;
     case SET_SCREEN_SAVER: return screenSaverForceNow ? 2 : settings.screenSaver;
     default: return 0;
   }
@@ -1239,13 +963,13 @@ int16_t getSettingValueRaw(uint8_t settingId) {
 void setSettingValueRaw(uint8_t settingId, int16_t value) {
   switch (settingId) {
     case SET_BPM: settings.manualBpm = constrain(value, 20, 300); break;
-    case SET_ARP_MODE: settings.arpMode = clampU8(value, 0, ARP_SELECTION_COUNT - 1); break;
+    case SET_ARP_MODE: settings.arpMode = clampU8(value, 0, ARP_MODE_COUNT - 1); break;
     case SET_DIVISION: settings.division = clampU8(value, 0, DIVISION_COUNT - 1); break;
     case SET_VELOCITY: settings.arpVelocity = clampU8(value, 1, 127); break;
     case SET_LENGTH: settings.arpLengthPct = clampU8(value, 1, 100); break;
     case SET_PATTERN: settings.pattern = clampU8(value, 0, PATTERN_COUNT - 1); break;
     case SET_INPUT_CH: settings.inputChannel = clampU8(value, 1, 16); break;
-    case SET_ARP_OUT_CH: settings.arpOutChannel = clampU8(value, 0, 19); break;
+    case SET_ARP_OUT_CH: settings.arpOutChannel = clampU8(value, 0, 16); break;
     case SET_BASS_CH: settings.bassMode = clampU8(value, 0, 48); break;
     case SET_THRU_OUT_CH: settings.thruOutChannel = clampU8(value, 0, 16); break;
     case SET_REMOTE_CH: settings.remoteChannel = clampU8(value, 1, 16); break;
@@ -1258,7 +982,6 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
     case SET_REMOTE2: settings.remote2Action = clampU8(value, 0, 254); break;
     case SET_LOAD_PRESET: settings.loadPreset = clampU8(value, 0, PRESET_COUNT - 1); break;
     case SET_SAVE_PRESET: settings.savePreset = clampU8(value, 0, PRESET_COUNT - 1); break;
-    case SET_USB_HOST_MODE: settings.usbHostMode = clampU8(value, 0, USB_HOST_MODE_COUNT - 1); break;
     case SET_SCREEN_SAVER:
       if (value >= 2) {
         screenSaverForceNow = true;
@@ -1293,7 +1016,7 @@ int16_t effectiveSettingValue(uint8_t settingId) {
   if (mode == SENSOR_PARAM_FULL) {
     const int span = SENSOR_ACTIVE_MAX_MM - VL53_VALID_MIN_MM;
     const int rel = constrain(SENSOR_ACTIVE_MAX_MM - sensorRt.mm, 0, span);
-    return map(rel, 0, span, base, maxValue);
+    return map(rel, 0, span, 0, maxValue);
   }
   return base;
 }
@@ -1318,7 +1041,7 @@ void saveStorage() {
 Settings defaultSettings() {
   Settings s{};
   s.manualBpm = 120;
-  s.arpMode = ARPSEL_UP;
+  s.arpMode = ARP_UP;
   s.division = DIV_1_8;
   s.arpVelocity = 96;
   s.arpLengthPct = 55;
@@ -1337,7 +1060,6 @@ Settings defaultSettings() {
   s.remote2Action = 61;
   s.loadPreset = 0;
   s.savePreset = 0;
-  s.usbHostMode = USB_HOST_IN_ONLY;
   s.screenSaver = 1;
   return s;
 }
@@ -1385,17 +1107,13 @@ void applySettingDelta(int delta, bool fastStep) {
     setSettingValueRaw(id, next);
   }
 
-  if (id == SET_DIVISION || id == SET_PATTERN || id == SET_ARP_MODE || id == SET_LENGTH || id == SET_VELOCITY) {
-    restartArpTiming(true);
-  }
-
   ui.dirty = true;
   markActivity();
 }
 
 void activateClickAction() {
   if (ui.selectedSetting == SET_PANIC) {
-    panicAndRestartHost();
+    panicAll();
     return;
   }
   if (ui.selectedSetting == SET_SAVE_PRESET) {
@@ -1435,7 +1153,7 @@ void encoderTurn(int delta, bool pressed) {
   }
   markActivity();
   if (ui.menuMode == MENU_SELECT) {
-    ui.selectedSetting = advanceSelectableSetting(ui.selectedSetting, delta);
+    ui.selectedSetting = wrapIndex(ui.selectedSetting + delta, SETTING_COUNT);
     ui.dirty = true;
     return;
   }
@@ -1494,84 +1212,43 @@ void pollEncoder() {
 
   if (encoder.switchDown && !encoder.turnWhilePressed &&
       (now - encoder.pressStartMs) >= LONG_HOLD_PANIC_MS) {
-    panicAndRestartHost();
+    panicAll();
     encoder.turnWhilePressed = true;
   }
 }
 
 void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t velocity, bool on) {
-  debugLastInputCh = channel1;
-  debugLastInputNote = note;
-
-  if (arpChannelSpecialMode() && channel1 == 10) {
-    markActivity(false);
-    if (liveNoteViewActive()) ui.dirty = true;
-    heldDrumNotes[note] = on && velocity > 0;
-    heldDrumVelocities[note] = (on && velocity > 0) ? velocity : 0;
-    rebuildHeldDrumCount();
-    return;
-  }
-
   if (channel1 != settings.inputChannel) {
     sendFanout(sourcePort, (on ? 0x90 : 0x80) | ((channel1 - 1) & 0x0F), note, velocity);
     return;
   }
 
-  if (arpChannelSplitMode() && splitDrumInputNote(note)) {
-    splitCandidateCount++;
-    markActivity(false);
-    if (liveNoteViewActive()) ui.dirty = true;
-    splitNoteHitCount++;
-    splitLastNote = note;
-    clearSplitNoteFromMainPaths(sourcePort, note);
-    if (currentArpSelection() == ARPSEL_OFF) {
-      if (on && velocity > 0) {
-        sendFanout(sourcePort, 0x90 | (10 - 1), note, 127);
-      } else {
-        sendFanout(sourcePort, 0x80 | (10 - 1), note, 0);
-      }
-      heldDrumNotes[note] = false;
-      heldDrumVelocities[note] = 0;
-      rebuildHeldDrumCount();
-      return;
-    }
-
-    const bool hadNoDrumKeys = (heldDrumCount == 0);
-    heldDrumNotes[note] = on && velocity > 0;
-    heldDrumVelocities[note] = (on && velocity > 0) ? velocity : 0;
-    rebuildHeldDrumCount();
-    if (on && velocity > 0 && hadNoDrumKeys) {
-      restartArpTiming(false);
-    }
-    return;
-  }
-
   markActivity(false);
-  if (liveNoteViewActive()) ui.dirty = true;
+  ui.dirty = true;
 
   if (on && velocity > 0) {
     heldInputNotes[note] = true;
     heldVelocities[note] = velocity;
     if (!arpHadKeys) {
-      restartArpTiming(false);
+      arpModeCursor = 0;
+      arpPatternStep = 0;
+      arpPendulumUp = true;
+      arpNextStepMs = millis();
     }
     arpHadKeys = true;
     noteThrough(sourcePort, note, velocity, true);
-    noteArpOffPassthrough(sourcePort, note, velocity, true);
   } else {
     heldInputNotes[note] = false;
     heldVelocities[note] = 0;
     noteThrough(sourcePort, note, 0, false);
-    noteArpOffPassthrough(sourcePort, note, 0, false);
   }
 
   rebuildHeldSorted();
   if (heldCount == 0) {
     arpHadKeys = false;
-    const uint8_t outCh = mainArpOutChannel();
     for (uint8_t i = 0; i < activeArpCount; ++i) {
-      if (activeArpNotes[i] >= 0 && channelEnabled(outCh)) {
-        sendFanout(255, 0x80 | ((outCh - 1) & 0x0F), activeArpNotes[i], 0);
+      if (activeArpNotes[i] >= 0 && channelEnabled(settings.arpOutChannel)) {
+        sendFanout(255, 0x80 | ((settings.arpOutChannel - 1) & 0x0F), activeArpNotes[i], 0);
       }
     }
     activeArpCount = 0;
@@ -1588,35 +1265,27 @@ void handleDinNoteOff(byte channel, byte pitch, byte velocity) {
   onInputNote(0, channel, pitch, 0, false);
 }
 
-void routeControlChange(uint8_t sourcePort, byte channel, byte control, byte value) {
+void handleDinCc(byte channel, byte control, byte value) {
   if (control != 0 && control != 32) markActivity(false);
   if (channel != settings.inputChannel) {
-    sendFanout(sourcePort, 0xB0 | ((channel - 1) & 0x0F), control, value);
+    sendFanout(0, 0xB0 | ((channel - 1) & 0x0F), control, value);
     return;
   }
-  forEachInputChannelOutput([&](uint8_t outCh) {
-    sendFanout(sourcePort, 0xB0 | ((outCh - 1) & 0x0F), control, value);
-  });
-}
-
-void handleDinCc(byte channel, byte control, byte value) {
-  routeControlChange(0, channel, control, value);
-}
-
-void routePitchBend(uint8_t sourcePort, byte channel, int bend) {
-  if (channel != settings.inputChannel) {
-    int bend14 = bend + 8192;
-    sendFanout(sourcePort, 0xE0 | ((channel - 1) & 0x0F), bend14 & 0x7F, (bend14 >> 7) & 0x7F);
-    return;
-  }
-  forEachInputChannelOutput([&](uint8_t outCh) {
-    int bend14 = bend + 8192;
-    sendFanout(sourcePort, 0xE0 | ((outCh - 1) & 0x0F), bend14 & 0x7F, (bend14 >> 7) & 0x7F);
-  });
+  const uint8_t outCh = effectiveThruChannel();
+  if (channelEnabled(outCh)) sendFanout(0, 0xB0 | ((outCh - 1) & 0x0F), control, value);
 }
 
 void handleDinPb(byte channel, int bend) {
-  routePitchBend(0, channel, bend);
+  if (channel != settings.inputChannel) {
+    int bend14 = bend + 8192;
+    sendFanout(0, 0xE0 | ((channel - 1) & 0x0F), bend14 & 0x7F, (bend14 >> 7) & 0x7F);
+    return;
+  }
+  const uint8_t outCh = effectiveThruChannel();
+  if (channelEnabled(outCh)) {
+    int bend14 = bend + 8192;
+    sendFanout(0, 0xE0 | ((outCh - 1) & 0x0F), bend14 & 0x7F, (bend14 >> 7) & 0x7F);
+  }
 }
 
 void handleDinClock() {
@@ -1632,89 +1301,24 @@ void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t dat
   } else if (type == 0x80) {
     onInputNote(sourcePort, channel, data1, 0, false);
   } else if (type == 0xB0) {
-    routeControlChange(sourcePort, channel, data1, data2);
+    handleDinCc(channel, data1, data2);
   } else if (type == 0xE0) {
-    routePitchBend(sourcePort, channel, static_cast<int>(data1 | (data2 << 7)) - 8192);
+    handleDinPb(channel, static_cast<int>(data1 | (data2 << 7)) - 8192);
   } else if (type == 0xC0 || type == 0xD0 || type == 0xA0) {
     if (channel != settings.inputChannel) {
       sendFanout(sourcePort, status, data1, data2);
     } else {
-      forEachInputChannelOutput([&](uint8_t outCh) {
+      const uint8_t outCh = effectiveThruChannel();
+      if (channelEnabled(outCh)) {
         sendFanout(sourcePort, (status & 0xF0) | ((outCh - 1) & 0x0F), data1, data2);
-      });
+      }
     }
   }
-}
-
-uint8_t usbMsgQueueDepth() {
-  return (usbMsgHead >= usbMsgTail)
-           ? static_cast<uint8_t>(usbMsgHead - usbMsgTail)
-           : static_cast<uint8_t>(USB_MSG_QUEUE_SIZE - (usbMsgTail - usbMsgHead));
-}
-
-bool isUsbNoteOffMessage(uint8_t status, uint8_t data2) {
-  const uint8_t type = status & 0xF0;
-  return type == 0x80 || (type == 0x90 && data2 == 0);
-}
-
-bool isUsbLowPriorityMessage(uint8_t status, uint8_t data2) {
-  if (status >= 0xF8) return status != 0xF8;
-  if (isUsbNoteOffMessage(status, data2)) return false;
-  const uint8_t type = status & 0xF0;
-  return type == 0x90 || type == 0xA0 || type == 0xB0 || type == 0xC0 || type == 0xD0 || type == 0xE0;
-}
-
-bool dropOldestQueuedUsbLowPriorityMessage() {
-  const uint8_t depth = usbMsgQueueDepth();
-  if (depth == 0) return false;
-
-  uint8_t readIdx = usbMsgTail;
-  uint8_t writeIdx = usbMsgTail;
-  bool dropped = false;
-
-  for (uint8_t i = 0; i < depth; ++i) {
-    const UsbQueuedMessage msg = usbMsgQueue[readIdx];
-    readIdx = static_cast<uint8_t>((readIdx + 1) % USB_MSG_QUEUE_SIZE);
-    if (!dropped && isUsbLowPriorityMessage(msg.status, msg.data2)) {
-      dropped = true;
-      continue;
-    }
-    usbMsgQueue[writeIdx] = msg;
-    writeIdx = static_cast<uint8_t>((writeIdx + 1) % USB_MSG_QUEUE_SIZE);
-  }
-
-  if (!dropped) return false;
-  usbMsgHead = writeIdx;
-  usbSoftDropCount++;
-  return true;
 }
 
 bool enqueueUsbMessage(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_t data2) {
-  const uint8_t depth = usbMsgQueueDepth();
-  const bool lowPriority = isUsbLowPriorityMessage(status, data2);
-
-  if (lowPriority && depth >= USB_MSG_HIGH_WATER) {
-    usbSoftDropCount++;
-    return false;
-  }
-
-  if (!lowPriority && depth >= USB_MSG_CRITICAL_WATER && dropOldestQueuedUsbLowPriorityMessage()) {
-    // Preserve note-offs/clock by sacrificing an older low-priority queued message first.
-  }
-
   const uint8_t next = static_cast<uint8_t>((usbMsgHead + 1) % USB_MSG_QUEUE_SIZE);
-  if (next == usbMsgTail) {
-    if (lowPriority) {
-      usbSoftDropCount++;
-      return false;
-    }
-    if (dropOldestQueuedUsbLowPriorityMessage()) {
-      return enqueueUsbMessage(sourcePort, status, data1, data2);
-    }
-    usbMsgCriticalOverflow = true;
-    usbCriticalDropCount++;
-    return false;
-  }
+  if (next == usbMsgTail) return false;
   usbMsgQueue[usbMsgHead].sourcePort = sourcePort;
   usbMsgQueue[usbMsgHead].status = status;
   usbMsgQueue[usbMsgHead].data1 = data1;
@@ -1723,52 +1327,8 @@ bool enqueueUsbMessage(uint8_t sourcePort, uint8_t status, uint8_t data1, uint8_
   return true;
 }
 
-uint8_t usbMidiCinLength(uint8_t cin) {
-  switch (cin) {
-    case 0x5:
-    case 0xF:
-      return 1;
-    case 0x2:
-    case 0x6:
-    case 0xC:
-    case 0xD:
-      return 2;
-    case 0x3:
-    case 0x4:
-    case 0x7:
-    case 0x8:
-    case 0x9:
-    case 0xA:
-    case 0xB:
-    case 0xE:
-      return 3;
-    default:
-      return 0;
-  }
-}
-
-bool enqueueUsbMidiPacket(uint8_t sourcePort, const uint8_t packet[4]) {
-  const uint8_t cin = packet[0] & 0x0F;
-  const uint8_t len = usbMidiCinLength(cin);
-  if (len == 0) return false;
-
-  const uint8_t status = packet[1];
-  if (status == 0 || status >= 0xF0) return false;
-
-  const uint8_t data1 = (len > 1) ? packet[2] : 0;
-  const uint8_t data2 = (len > 2) ? packet[3] : 0;
-  const uint8_t type = status & 0xF0;
-  if (type == 0x80 || type == 0x90) {
-    usbHostNoteHitCount++;
-    usbHostLastInputCh = (status & 0x0F) + 1;
-    usbHostLastInputNote = data1;
-  }
-  return enqueueUsbMessage(sourcePort, status, data1, data2);
-}
-
-void drainUsbMessageQueue(uint8_t maxMessages = 24) {
-  uint8_t processed = 0;
-  while (usbMsgTail != usbMsgHead && processed < maxMessages) {
+void drainUsbMessageQueue() {
+  while (usbMsgTail != usbMsgHead) {
     const UsbQueuedMessage msg = usbMsgQueue[usbMsgTail];
     usbMsgTail = static_cast<uint8_t>((usbMsgTail + 1) % USB_MSG_QUEUE_SIZE);
     if (msg.status >= 0xF8) {
@@ -1777,7 +1337,50 @@ void drainUsbMessageQueue(uint8_t maxMessages = 24) {
     } else {
       routeIncomingChannelMessage(msg.sourcePort, msg.status, msg.data1, msg.data2);
     }
-    processed++;
+  }
+}
+
+void processUsbMidiByte(uint8_t sourcePort, UsbMidiParser &parser, uint8_t b) {
+  if (b >= 0xF8) {
+    enqueueUsbMessage(sourcePort, b, 0, 0);
+    return;
+  }
+
+  if (b & 0x80) {
+    parser.runningStatus = b;
+    parser.needed = midiMessageDataLength(b);
+    parser.have = 0;
+    if (parser.needed == 0) {
+      parser.runningStatus = 0;
+    }
+    return;
+  }
+
+  if (parser.runningStatus == 0 || parser.needed == 0) return;
+  parser.data[parser.have++] = b;
+  if (parser.have < parser.needed) return;
+
+  const uint8_t status = parser.runningStatus;
+  const uint8_t data1 = parser.data[0];
+  const uint8_t data2 = (parser.needed > 1) ? parser.data[1] : 0;
+  enqueueUsbMessage(sourcePort, status, data1, data2);
+  parser.have = 0;
+}
+
+void pollUsbMidiInput(uint8_t idx) {
+  if (idx >= MAX_USB_MIDI_DEVICES) return;
+  UsbMidiParser &parser = usbMidiParsers[idx];
+  uint8_t cable = 0;
+  uint8_t buffer[48];
+  while (true) {
+    const uint32_t n = tuh_midi_stream_read(idx, &cable, buffer, sizeof(buffer));
+    if (n == 0) break;
+    usbLastRxIdx = idx;
+    usbLastRxMs = millis();
+    const uint8_t sourcePort = usbPortFromIdx(idx);
+    for (uint32_t i = 0; i < n; ++i) {
+      processUsbMidiByte(sourcePort, parser, buffer[i]);
+    }
   }
 }
 
@@ -1785,21 +1388,6 @@ void flushUsbMidiOutput() {
   for (uint8_t i = 0; i < MAX_USB_MIDI_DEVICES; ++i) {
     if (usbMidiDevices[i].mounted && usbMidiDevices[i].txCableCount > 0) {
       tuh_midi_write_flush(usbMidiDevices[i].idx);
-    }
-  }
-}
-
-void drainUsbTxQueue() {
-  while (usbTxTail != usbTxHead) {
-    const UsbQueuedMessage msg = usbTxQueue[usbTxTail];
-    usbTxTail = static_cast<uint8_t>((usbTxTail + 1) % USB_TX_QUEUE_SIZE);
-    const uint8_t len = 1 + midiMessageDataLength(msg.status);
-    uint8_t packet[3] = {msg.status, msg.data1, msg.data2};
-    for (uint8_t i = 0; i < MAX_USB_MIDI_DEVICES; ++i) {
-      UsbMidiDevice &dev = usbMidiDevices[i];
-      if (!dev.mounted || dev.txCableCount == 0) continue;
-      if (msg.sourcePort != 255 && msg.sourcePort == usbPortFromIdx(dev.idx)) continue;
-      tuh_midi_stream_write(dev.idx, 0, packet, len);
     }
   }
 }
@@ -1821,10 +1409,12 @@ void setupUsbHost() {
 }
 
 void taskUsbHost() {
-  if (!usbHostEnabled()) return;
-  if (usbParserResetRequested) usbParserResetRequested = false;
   USBHost.task();
-  drainUsbTxQueue();
+  for (uint8_t idx = 0; idx < MAX_USB_MIDI_DEVICES; ++idx) {
+    if (tuh_midi_mounted(idx) && tuh_midi_read_available(idx) > 0) {
+      pollUsbMidiInput(idx);
+    }
+  }
   flushUsbMidiOutput();
 }
 
@@ -1837,7 +1427,6 @@ void setup1() {
 }
 
 void beginUsbHost() {
-  if (!usbHostEnabled()) return;
   setupUsbHost();
   if (clock_get_hz(clk_sys) == 120000000UL || clock_get_hz(clk_sys) == 240000000UL) {
     USBHost.begin(1);
@@ -1857,6 +1446,7 @@ void tuh_midi_mount_cb(uint8_t idx, const tuh_midi_mount_cb_t *mount_cb_data) {
       usbMidiDevices[i].daddr = mount_cb_data->daddr;
       usbMidiDevices[i].rxCableCount = mount_cb_data->rx_cable_count;
       usbMidiDevices[i].txCableCount = mount_cb_data->tx_cable_count;
+      usbMidiParsers[idx] = UsbMidiParser{};
       usbMidiMountedCount++;
       usbUiDirty = true;
       break;
@@ -1869,6 +1459,7 @@ void tuh_midi_umount_cb(uint8_t idx) {
   for (uint8_t i = 0; i < MAX_USB_MIDI_DEVICES; ++i) {
     if (usbMidiDevices[i].mounted && usbMidiDevices[i].idx == idx) {
       usbMidiDevices[i] = UsbMidiDevice{};
+      usbMidiParsers[idx] = UsbMidiParser{};
       if (usbMidiMountedCount > 0) usbMidiMountedCount--;
       usbUiDirty = true;
       break;
@@ -1889,16 +1480,8 @@ void tuh_umount_cb(uint8_t daddr) {
 }
 
 void tuh_midi_rx_cb(uint8_t idx, uint32_t num_packets) {
-  if (idx >= MAX_USB_MIDI_DEVICES || num_packets == 0) return;
-  const uint8_t sourcePort = usbPortFromIdx(idx);
-  uint8_t packet[4];
-  uint32_t packetsRead = 0;
-  while (packetsRead < num_packets && tuh_midi_packet_read(idx, packet)) {
-    usbLastRxIdx = idx;
-    usbLastRxMs = millis();
-    enqueueUsbMidiPacket(sourcePort, packet);
-    packetsRead++;
-  }
+  (void)num_packets;
+  pollUsbMidiInput(idx);
 }
 
 void tuh_midi_tx_cb(uint8_t idx, uint32_t num_bytes) {
@@ -1909,8 +1492,7 @@ void tuh_midi_tx_cb(uint8_t idx, uint32_t num_bytes) {
 
 int8_t arpModeNextIndex() {
   if (heldCount == 0) return -1;
-  const uint8_t mode = classicArpModeFromSelection(currentArpSelection());
-  switch (mode) {
+  switch (settings.arpMode) {
     case ARP_UP: {
       const uint8_t idx = arpModeCursor % heldCount;
       arpModeCursor = (arpModeCursor + 1) % heldCount;
@@ -1925,7 +1507,7 @@ int8_t arpModeNextIndex() {
     case ARP_UPDOWN2: {
       if (heldCount == 1) return 0;
       int8_t idx = arpModeCursor;
-      if (mode == ARP_UPDOWN1) {
+      if (settings.arpMode == ARP_UPDOWN1) {
         if (arpPendulumUp) {
           arpModeCursor++;
           if (arpModeCursor >= static_cast<int8_t>(heldCount - 1)) arpPendulumUp = false;
@@ -1963,86 +1545,47 @@ int8_t arpModeNextIndex() {
 }
 
 void arpNoteOffs() {
-  const uint8_t outCh = mainArpOutChannel();
-  if (!channelEnabled(outCh)) return;
+  if (!channelEnabled(settings.arpOutChannel)) return;
   for (uint8_t i = 0; i < activeArpCount; ++i) {
     if (activeArpNotes[i] >= 0) {
-      sendFanout(255, 0x80 | ((outCh - 1) & 0x0F), activeArpNotes[i], 0);
+      sendFanout(255, 0x80 | ((settings.arpOutChannel - 1) & 0x0F), activeArpNotes[i], 0);
     }
   }
   activeArpCount = 0;
 }
 
 void arpAddOutput(uint8_t note) {
-  const uint8_t outCh = mainArpOutChannel();
-  if (!channelEnabled(outCh)) return;
   if (activeArpCount >= MAX_ARP_OUTPUT_NOTES) return;
   for (uint8_t i = 0; i < activeArpCount; ++i) {
     if (activeArpNotes[i] == static_cast<int8_t>(note)) return;
   }
   activeArpNotes[activeArpCount++] = note;
-  sendFanout(255, 0x90 | ((outCh - 1) & 0x0F), note, currentArpVelocitySetting());
-}
-
-void drumArpNoteOffs() {
-  if (!arpChannelSpecialMode()) return;
-  for (uint8_t i = 0; i < activeDrumArpCount; ++i) {
-    if (activeDrumArpNotes[i] >= 0) {
-      sendFanout(255, 0x80 | (10 - 1), activeDrumArpNotes[i], 0);
-    }
-  }
-  activeDrumArpCount = 0;
-}
-
-void drumArpAddOutput(uint8_t note, uint8_t velocity) {
-  if (!arpChannelSpecialMode()) return;
-  if (activeDrumArpCount >= MAX_HELD_NOTES) return;
-  for (uint8_t i = 0; i < activeDrumArpCount; ++i) {
-    if (activeDrumArpNotes[i] == static_cast<int8_t>(note)) return;
-  }
-  activeDrumArpNotes[activeDrumArpCount++] = note;
-  drumOutHitCount++;
-  drumLastOutNote = note;
-  sendFanout(255, 0x90 | (10 - 1), note, 127);
+  sendFanout(255, 0x90 | ((settings.arpOutChannel - 1) & 0x0F), note, settings.arpVelocity);
 }
 
 void runArpStep() {
-  const uint8_t arpSelection = currentArpSelection();
-  const uint8_t arpPattern = patternFromArpSelection(arpSelection);
-  const uint8_t arpMode = classicArpModeFromSelection(arpSelection);
-  const bool mainArpEnabled = channelEnabled(mainArpOutChannel()) && arpMode != ARP_OFF && heldCount > 0;
-  const bool drumArpEnabled = arpChannelSpecialMode() && heldDrumCount > 0;
-
-  if (!mainArpEnabled && !drumArpEnabled) {
+  if (!channelEnabled(settings.arpOutChannel) || settings.arpMode == ARP_OFF || heldCount == 0) {
     arpNoteOffs();
-    drumArpNoteOffs();
     return;
   }
 
   arpNoteOffs();
-  drumArpNoteOffs();
   const uint8_t step = arpPatternStep % 16;
-  const PatternToken token = kPatterns[arpPattern][step];
+  const PatternToken token = kPatterns[settings.pattern][step];
 
-  if (mainArpEnabled && token.noteIndex == TOK_REST) {
+  if (token.noteIndex == TOK_REST) {
     arpGateOffMs = 0;
     arpPatternStep = (arpPatternStep + 1) % 16;
-    if (drumArpEnabled) {
-      for (uint8_t note = 0; note < 128; ++note) {
-        if (heldDrumNotes[note]) drumArpAddOutput(note, heldDrumVelocities[note] ? heldDrumVelocities[note] : currentArpVelocitySetting());
-      }
-      arpGateOffMs = millis() + max<uint32_t>(15, (divisionStepMs() * currentArpLengthPctSetting()) / 100);
-    }
     return;
   }
 
-  if (mainArpEnabled && (token.noteIndex == TOK_ALL || arpMode == ARP_TRIGGER)) {
+  if (token.noteIndex == TOK_ALL || settings.arpMode == ARP_TRIGGER) {
     for (uint8_t i = 0; i < heldCount && i < MAX_ARP_OUTPUT_NOTES; ++i) {
       arpAddOutput(quantizeUp(heldSorted[i]));
     }
-  } else if (mainArpEnabled) {
+  } else {
     int8_t idx = token.noteIndex;
-    if (idx == TOK_MODE || arpPattern == PAT_MODE || arpPattern == PAT_RANDOM) {
+    if (idx == TOK_MODE || settings.pattern == PAT_MODE || settings.pattern == PAT_RANDOM) {
       idx = arpModeNextIndex();
     }
     if (idx >= 0 && heldCount > 0) {
@@ -2053,29 +1596,19 @@ void runArpStep() {
     }
   }
 
-  if (drumArpEnabled) {
-    for (uint8_t note = 0; note < 128; ++note) {
-      if (heldDrumNotes[note]) {
-        drumArpAddOutput(note, heldDrumVelocities[note] ? heldDrumVelocities[note] : currentArpVelocitySetting());
-      }
-    }
-  }
-
-  const uint32_t gateMs = max<uint32_t>(15, (divisionStepMs() * currentArpLengthPctSetting()) / 100);
+  const uint32_t gateMs = max<uint32_t>(15, (divisionStepMs() * settings.arpLengthPct) / 100);
   arpGateOffMs = millis() + gateMs;
   arpPatternStep = (arpPatternStep + 1) % 16;
 }
 
 void tickArp() {
   const uint32_t now = millis();
-  if (heldCount == 0 && heldDrumCount == 0) {
+  if (heldCount == 0) {
     arpNoteOffs();
-    drumArpNoteOffs();
     return;
   }
   if (arpGateOffMs && now >= arpGateOffMs) {
     arpNoteOffs();
-    drumArpNoteOffs();
     arpGateOffMs = 0;
   }
   if (arpNextStepMs == 0 || now >= arpNextStepMs) {
@@ -2194,7 +1727,7 @@ void updateSensorOutput() {
     note = quantizeUp(note);
     if (note != sensorRt.activeNote) {
       if (sensorRt.activeNote >= 0) sendFanout(253, 0x80 | ((ch - 1) & 0x0F), sensorRt.activeNote, 0);
-      sendFanout(253, 0x90 | ((ch - 1) & 0x0F), note, currentArpVelocitySetting());
+      sendFanout(253, 0x90 | ((ch - 1) & 0x0F), note, settings.arpVelocity);
       sensorRt.activeNote = note;
     }
     return;
@@ -2293,13 +1826,14 @@ String settingValueString(uint8_t id) {
   const int16_t v = effectiveSettingValue(id);
   switch (id) {
     case SET_BPM: {
+      if ((millis() - clockTracker.lastDinClockMs) < 2000UL) return String(v) + " AUTO DIN";
       return String(v);
     }
-    case SET_ARP_MODE: return kArpSelectionNames[v];
+    case SET_ARP_MODE: return kArpModeNames[v];
     case SET_DIVISION: return kDivisionNames[v];
     case SET_VELOCITY: return String(map(v, 0, 127, 0, 100)) + "%";
     case SET_LENGTH: return String(v) + "%";
-    case SET_PATTERN: return "";
+    case SET_PATTERN: return kPatternNames[v];
     case SET_INPUT_CH: return midiChannelLabel(v);
     case SET_ARP_OUT_CH: return midiChannelLabel(v, true);
     case SET_BASS_CH: return bassLabel(v);
@@ -2314,7 +1848,6 @@ String settingValueString(uint8_t id) {
     case SET_REMOTE2: return remoteActionLabel(v);
     case SET_LOAD_PRESET: return String(v + 1);
     case SET_SAVE_PRESET: return String(v + 1);
-    case SET_USB_HOST_MODE: return kUsbHostModeNames[v];
     case SET_SCREEN_SAVER:
       if (v == 0) return "OFF";
       if (v == 1) return "AUTO";
@@ -2355,23 +1888,11 @@ void drawBarValue(uint8_t pct, const String &label) {
 }
 
 void drawDivisionPie(uint8_t divisionId) {
-  const int cx = 90;
-  const int cy = 20;
-  const int r = 18;
-  display.drawCircle(cx, cy, r, SSD1306_WHITE);
-  const float measureFraction = kDivisionQuarterSteps[divisionId] / 4.0f;
-  if (measureFraction >= 0.99f) {
-    display.fillCircle(cx, cy, r - 1, SSD1306_WHITE);
-  } else {
-    const float start = -HALF_PI;
-    const float end = start + (TWO_PI * measureFraction);
-    for (uint8_t i = 0; i <= 48; ++i) {
-      const float t = static_cast<float>(i) / 48.0f;
-      const float a = start + ((end - start) * t);
-      display.drawLine(cx, cy, cx + static_cast<int>(cos(a) * (r - 1)), cy + static_cast<int>(sin(a) * (r - 1)), SSD1306_WHITE);
-    }
-    display.drawLine(cx, cy, cx, cy - r, SSD1306_WHITE);
-    display.drawLine(cx, cy, cx + static_cast<int>(cos(end) * r), cy + static_cast<int>(sin(end) * r), SSD1306_WHITE);
+  display.drawCircle(64, 20, 18, SSD1306_WHITE);
+  const uint8_t slices = constrain(divisionId + 1, 1, 12);
+  for (uint8_t i = 0; i < slices; ++i) {
+    const float a = (TWO_PI * i) / slices;
+    display.drawLine(64, 20, 64 + static_cast<int>(cos(a) * 18), 20 + static_cast<int>(sin(a) * 18), SSD1306_WHITE);
   }
   display.setTextSize(2);
   display.setCursor(0, 28);
@@ -2381,26 +1902,23 @@ void drawDivisionPie(uint8_t divisionId) {
 void drawArpModeSymbol(uint8_t mode) {
   display.setTextSize(2);
   display.setCursor(0, 0);
-  display.print(kArpSelectionNames[mode]);
+  display.print(kArpModeNames[mode]);
   const int y = 40;
-  if (mode == ARPSEL_UP) {
+  if (mode == ARP_UP) {
     display.drawLine(10, y, 30, y - 20, SSD1306_WHITE);
     display.drawLine(30, y - 20, 50, y, SSD1306_WHITE);
     display.drawLine(50, y, 70, y - 20, SSD1306_WHITE);
-  } else if (mode == ARPSEL_DOWN) {
+  } else if (mode == ARP_DOWN) {
     display.drawLine(10, y - 20, 30, y, SSD1306_WHITE);
     display.drawLine(30, y, 50, y - 20, SSD1306_WHITE);
     display.drawLine(50, y - 20, 70, y, SSD1306_WHITE);
-  } else if (mode == ARPSEL_TRIGGER) {
+  } else if (mode == ARP_TRIGGER) {
     for (uint8_t i = 0; i < 4; ++i) display.drawLine(18 + i * 22, 34, 18 + i * 22, 44, SSD1306_WHITE);
-  } else if (mode == ARPSEL_RANDOM) {
+  } else if (mode == ARP_RANDOM) {
     display.drawLine(8, 42, 22, 30, SSD1306_WHITE);
     display.drawLine(22, 30, 42, 44, SSD1306_WHITE);
     display.drawLine(42, 44, 68, 26, SSD1306_WHITE);
     display.drawLine(68, 26, 94, 38, SSD1306_WHITE);
-  } else if (mode == ARPSEL_OFF) {
-    display.drawLine(8, 26, 94, 42, SSD1306_WHITE);
-    display.drawLine(8, 42, 94, 26, SSD1306_WHITE);
   } else {
     display.drawLine(8, 42, 24, 26, SSD1306_WHITE);
     display.drawLine(24, 26, 40, 42, SSD1306_WHITE);
@@ -2542,25 +2060,10 @@ void drawChannelScreen(const __FlashStringHelper *title, int channel, bool allow
   display.setTextSize(2);
   display.setCursor(0, 0);
   display.print(title);
-  if (allowOff && channel == 0) {
-    display.setTextSize(3);
-    display.setCursor(0, 18);
-    display.print(F("OFF"));
-  } else if (channel == 17) {
-    display.setTextSize(3);
-    display.setCursor(0, 18);
-    display.print(F("1+10"));
-  } else if (channel == 18) {
-    display.setTextSize(3);
-    display.setCursor(0, 18);
-    display.print(F("1-10 24"));
-  } else if (channel == 19) {
-    display.setTextSize(3);
-    display.setCursor(0, 18);
-    display.print(F("1-10 9"));
-  } else {
-    display.setTextSize(3);
-    display.setCursor(0, 18);
+  display.setTextSize(3);
+  display.setCursor(0, 18);
+  if (allowOff && channel == 0) display.print(F("OFF"));
+  else {
     display.print(F("CH "));
     display.print(channel);
   }
@@ -2593,56 +2096,24 @@ void drawBassScreen(uint8_t mode) {
 }
 
 void drawUsbDebugScreen() {
-  display.setTextSize(1);
+  display.setTextSize(2);
   display.setCursor(0, 0);
-  display.print(F("A "));
-  display.print(settings.arpOutChannel);
-  display.print(F(" DEV "));
+  display.print(F("DEV "));
   display.print(static_cast<uint8_t>(usbAnyMountedCount));
-  display.print(F("/"));
-  display.print(static_cast<uint8_t>(usbMidiMountedCount));
-  display.setCursor(0, 8);
-  display.print(F("RX "));
-  if (usbLastRxIdx == 0xFF) display.print(F("--"));
-  else display.print(usbLastRxIdx);
-  display.print(F(" AGE "));
-  const uint32_t age = (usbLastRxIdx == 0xFF) ? 0 : (millis() - usbLastRxMs);
-  if (usbLastRxIdx != 0xFF && age > 9999) display.print(F("OLD"));
-  else display.print(age);
   display.setCursor(0, 16);
-  display.print(F("U "));
-  display.print(static_cast<uint16_t>(usbHostNoteHitCount));
-  display.print(F(" "));
-  if (usbHostLastInputCh == 0xFF) display.print(F("--/--"));
-  else {
-    display.print(usbHostLastInputCh);
-    display.print(F("/"));
-    display.print(usbHostLastInputNote);
-  }
-  display.setCursor(0, 24);
-  display.print(F("I "));
-  if (debugLastInputCh == 0xFF) display.print(F("--/--"));
-  else {
-    display.print(debugLastInputCh);
-    display.print(F("/"));
-    display.print(debugLastInputNote);
-  }
+  display.print(F("MIDI "));
+  display.print(static_cast<uint8_t>(usbMidiMountedCount));
   display.setCursor(0, 32);
-  display.print(F("C "));
-  display.print(static_cast<uint16_t>(splitCandidateCount));
-  display.print(F(" SPL "));
-  display.print(static_cast<uint16_t>(splitNoteHitCount));
-  display.print(F(" N "));
-  if (splitLastNote == 0xFF) display.print(F("--"));
-  else display.print(splitLastNote);
-  display.setCursor(0, 40);
-  display.print(F("D "));
-  display.print(static_cast<uint16_t>(drumOutHitCount));
-  display.print(F(" N "));
-  if (drumLastOutNote == 0xFF) display.print(F("--"));
-  else display.print(drumLastOutNote);
-  display.print(F(" Q "));
-  display.print(usbMsgQueueDepth());
+  display.print(F("RX "));
+  if (usbLastRxIdx == 0xFF) {
+    display.print(F("--"));
+  } else {
+    display.print(usbLastRxIdx);
+    display.print(' ');
+    const uint32_t age = millis() - usbLastRxMs;
+    if (age > 9999) display.print(F("OLD"));
+    else display.print(age);
+  }
 }
 
 void renderMainTop() {
@@ -2655,8 +2126,7 @@ void renderMainTop() {
       display.print(currentBpm());
       break;
     case SET_ARP_MODE:
-      if (arpSelectionIsClassicMode(v)) drawArpModeSymbol(v);
-      else drawPatternPreview(patternFromArpSelection(v));
+      drawArpModeSymbol(v);
       break;
     case SET_DIVISION:
       drawDivisionPie(v);
@@ -2666,6 +2136,9 @@ void renderMainTop() {
       break;
     case SET_LENGTH:
       drawBarValue(v, String(v) + "%");
+      break;
+    case SET_PATTERN:
+      drawPatternPreview(v);
       break;
     case SET_INPUT_CH:
       drawChannelScreen(F("INPUT"), v);
@@ -2757,7 +2230,6 @@ void renderDisplayIfNeeded() {
 
 void processDeferredUiActions() {
   if (!ui.deferredExitWork) return;
-  bool rebootForHostMode = false;
 
   if (ui.deferredSaveOnly) {
     storage.currentPreset = settings.savePreset;
@@ -2771,8 +2243,6 @@ void processDeferredUiActions() {
     loadCurrentPreset();
   } else {
     if (ui.hasPendingEdit && ui.pendingSetting == ui.selectedSetting) {
-      rebootForHostMode = (ui.pendingSetting == SET_USB_HOST_MODE &&
-                           ui.pendingValue != getSettingValueRaw(SET_USB_HOST_MODE));
       panicMidiOnly();
       setSettingValueRaw(ui.pendingSetting, ui.pendingValue);
       ui.hasPendingEdit = false;
@@ -2783,17 +2253,15 @@ void processDeferredUiActions() {
   ui.deferredExitWork = false;
   ui.deferredLoadPreset = false;
   ui.deferredSaveOnly = false;
-
-  if (rebootForHostMode) rebootBoard(F("USB mode"));
 }
 
 void showBootStage(const __FlashStringHelper *line1,
-                   const __FlashStringHelper *line2) {
+                   const __FlashStringHelper *line2 = nullptr) {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(2);
   display.setCursor(0, 0);
-  display.println(F("ARPnMIDI"));
+  display.println(F("ARPNMIDI"));
   display.setTextSize(1);
   display.setCursor(0, 24);
   display.println(line1);
@@ -2855,38 +2323,10 @@ void setupPins() {
 #endif
 }
 
-void factoryResetStorage() {
-  EEPROM.begin(EEPROM_BYTES);
-  for (size_t i = 0; i < EEPROM_BYTES; ++i) EEPROM.write(i, 0xFF);
-  EEPROM.commit();
-}
-
-void maybeConfirmFactoryResetAtBoot() {
-  if (digitalRead(PIN_ENC_SW) != LOW) return;
-
-  showBootStage(F("Reset all?"), F("Release button"));
-  while (digitalRead(PIN_ENC_SW) == LOW) delay(5);
-
-  showBootStage(F("Press again"), F("to confirm"));
-  const uint32_t startMs = millis();
-  while ((millis() - startMs) < 5000UL) {
-    if (digitalRead(PIN_ENC_SW) == LOW) {
-      delay(20);
-      while (digitalRead(PIN_ENC_SW) == LOW) delay(5);
-      showBootStage(F("Clearing"), F("defaults..."));
-      factoryResetStorage();
-      delay(150);
-      break;
-    }
-    delay(5);
-  }
-}
-
 void setup() {
   delay(300);
   setupPins();
   setupDisplay();
-  maybeConfirmFactoryResetAtBoot();
   showBootStage(F("Storage..."));
   initStorageIfNeeded();
   showBootStage(F("Held state..."));
@@ -2895,7 +2335,6 @@ void setup() {
   setupSensor();
   showBootStage(F("DIN MIDI..."));
   setupDinMidi();
-  panicMidiOnly();
   showBootStage(F("Ready"));
   usbHostStartRequested = true;
   ui.lastActivityMs = millis();
@@ -2907,18 +2346,10 @@ void loop() {
     usbUiDirty = false;
     ui.dirty = true;
   }
-  if (usbMsgCriticalOverflow) {
-    usbMsgCriticalOverflow = false;
-    usbMsgTail = usbMsgHead;
-    panicMidiOnly();
-    resetHeldState();
-    usbParserResetRequested = true;
-    ui.dirty = true;
-  }
+  drainUsbMessageQueue();
+  DinMIDI.read();
   pollEncoder();
   pollPedals();
-  DinMIDI.read();
-  drainUsbMessageQueue(8);
   pollSensor();
   tickArp();
   renderDisplayIfNeeded();
