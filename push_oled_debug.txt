@@ -1,0 +1,121 @@
+/*
+  push_oled_debug.txt
+  Quick standalone debug for push/pressure analog input on RP2040 Zero.
+
+  Wiring expected:
+  - OLED SSD1306 128x64 I2C on GP2 (SDA) + GP3 (SCL), address 0x3C
+  - Push/pressure analog signal on GP26
+
+  What it shows on OLED in real time:
+  - Raw ADC value (0..4095)
+  - Estimated voltage
+  - Active status using the same thresholds as main sketch
+  - Running min/max seen values
+*/
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+constexpr uint8_t PIN_I2C_SDA = 2;
+constexpr uint8_t PIN_I2C_SCL = 3;
+constexpr uint8_t PIN_PUSH = 26;
+
+constexpr uint8_t OLED_ADDR = 0x3C;
+constexpr uint8_t SCREEN_W = 128;
+constexpr uint8_t SCREEN_H = 64;
+constexpr uint16_t POLL_MS = 40;
+
+// Same range as the current main sketch.
+constexpr uint16_t PUSH_RAW_MIN = 200;
+constexpr uint16_t PUSH_RAW_MAX = 3900;
+
+Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire1, -1);
+
+uint32_t lastPollMs = 0;
+uint16_t rawNow = 0;
+uint16_t rawMinSeen = 4095;
+uint16_t rawMaxSeen = 0;
+bool oledOk = false;
+
+void drawFrame() {
+  if (!oledOk) return;
+
+  const float volts = (static_cast<float>(rawNow) * 3.3f) / 4095.0f;
+  const bool active = (rawNow >= PUSH_RAW_MIN && rawNow <= PUSH_RAW_MAX);
+  const int pct = active ? map(rawNow, PUSH_RAW_MIN, PUSH_RAW_MAX, 0, 100) : 0;
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(0, 0);
+  display.print(F("PUSH DEBUG GP26"));
+
+  display.setCursor(0, 12);
+  display.print(F("RAW: "));
+  display.print(rawNow);
+
+  display.setCursor(0, 22);
+  display.print(F("V: "));
+  display.print(volts, 3);
+  display.print(F("V"));
+
+  display.setCursor(0, 32);
+  display.print(F("ACTIVE: "));
+  display.print(active ? F("YES") : F("NO"));
+  display.print(F("  "));
+  display.print(pct);
+  display.print(F("%"));
+
+  display.setCursor(0, 44);
+  display.print(F("SEEN "));
+  display.print(rawMinSeen);
+  display.print(F(".."));
+  display.print(rawMaxSeen);
+
+  display.setCursor(0, 54);
+  display.print(F("RANGE "));
+  display.print(PUSH_RAW_MIN);
+  display.print(F(".."));
+  display.print(PUSH_RAW_MAX);
+
+  display.display();
+}
+
+void setup() {
+  pinMode(PIN_PUSH, INPUT);
+
+  Wire1.setSDA(PIN_I2C_SDA);
+  Wire1.setSCL(PIN_I2C_SCL);
+  Wire1.begin();
+  Wire1.setClock(400000);
+
+  oledOk = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  if (!oledOk) return;
+
+  // Keep same orientation as your main sketch.
+  display.setRotation(2);
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.print(F("PUSH DEBUG START"));
+  display.display();
+}
+
+void loop() {
+  if (!oledOk) return;
+
+  const uint32_t now = millis();
+  if ((now - lastPollMs) < POLL_MS) return;
+  lastPollMs = now;
+
+  rawNow = analogRead(PIN_PUSH);
+  if (rawNow < rawMinSeen) rawMinSeen = rawNow;
+  if (rawNow > rawMaxSeen) rawMaxSeen = rawNow;
+
+  drawFrame();
+}
+

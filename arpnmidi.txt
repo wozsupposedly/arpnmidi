@@ -117,9 +117,10 @@ constexpr uint16_t USB_MSG_QUEUE_SIZE = 192;
 constexpr uint8_t USB_MSG_HIGH_WATER = USB_MSG_QUEUE_SIZE - 24;
 constexpr uint8_t USB_MSG_CRITICAL_WATER = USB_MSG_QUEUE_SIZE - 8;
 constexpr uint8_t USB_TX_QUEUE_SIZE = 128;
-constexpr uint32_t USB_HOST_LOOP_STALL_MS = 5000UL;
+constexpr uint32_t USB_HOST_LOOP_STALL_MS = 4000UL;
 constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
-constexpr uint16_t EEPROM_MAGIC = 0x4D43;
+constexpr uint16_t EEPROM_MAGIC_V1 = 0x4D43;
+constexpr uint16_t EEPROM_MAGIC = 0x4D44;
 constexpr size_t EEPROM_BYTES = 2048;
 
 decltype(Serial1) &DinSerial = Serial1;
@@ -159,6 +160,7 @@ enum SettingId : uint8_t {
   SET_BASS_CH,
   SET_THRU_OUT_CH,
   SET_DIV_NOTES,
+  SET_LEGATO_CH,
   SET_CC_OUT_CH,
   SET_REMOTE_CH,
   SET_SENSOR_CH,
@@ -346,12 +348,49 @@ struct Settings {
   uint8_t divNoteNotes[DIV_NOTE_SLOT_COUNT];
   uint8_t divNotePlusNote;
   uint8_t pushMode;
+  uint8_t legatoChannel;
+};
+
+struct SettingsV1 {
+  uint16_t manualBpm;
+  uint8_t arpMode;
+  uint8_t division;
+  uint8_t arpVelocity;
+  uint8_t arpLengthPct;
+  uint8_t pattern;
+  uint8_t inputChannel;
+  uint8_t arpOutChannel;
+  uint8_t bassMode;
+  uint8_t thruOutChannel;
+  uint8_t ccOutChannel;
+  uint8_t remoteChannel;
+  uint8_t sensorChannel;
+  uint8_t sensorMode;
+  uint8_t forceKey;
+  uint8_t forceScale;
+  uint8_t instrumentView;
+  uint8_t remote1Action;
+  uint8_t remote2Action;
+  uint8_t loadPreset;
+  uint8_t savePreset;
+  uint8_t usbHostMode;
+  uint8_t screenSaver;
+  uint8_t divNoteChannels[DIV_NOTE_SLOT_COUNT];
+  uint8_t divNoteNotes[DIV_NOTE_SLOT_COUNT];
+  uint8_t divNotePlusNote;
+  uint8_t pushMode;
 };
 
 struct StorageImage {
   uint16_t magic;
   uint8_t currentPreset;
   Settings presets[PRESET_COUNT];
+};
+
+struct StorageImageV1 {
+  uint16_t magic;
+  uint8_t currentPreset;
+  SettingsV1 presets[PRESET_COUNT];
 };
 
 struct ClockTracker {
@@ -447,6 +486,7 @@ volatile uint8_t usbMidiMountedCount = 0;
 volatile uint8_t usbLastRxIdx = 0xFF;
 volatile uint32_t usbLastRxMs = 0;
 volatile uint32_t usbHostBeatLastMs = 0;
+volatile uint32_t usbHostBeatCounter = 0;
 volatile bool usbUiDirty = false;
 volatile bool usbHostStartRequested = false;
 volatile bool usbHostStarted = false;
@@ -488,6 +528,16 @@ uint8_t mappedThruNotes[128];
 uint8_t mappedArpOffNotes[128];
 uint8_t thruOutputRefCount[128];
 uint8_t arpOffOutputRefCount[128];
+uint8_t legatoHeldCount[128];
+uint8_t legatoHeldVelocity[128];
+uint8_t legatoHeldSource[128];
+uint32_t legatoHeldOrder[128];
+uint32_t legatoOrderCounter = 0;
+bool legatoOutputActive = false;
+uint8_t legatoOutputNote = 0xFF;
+uint8_t legatoOutputVelocity = 0;
+uint8_t legatoOutputSource = 255;
+uint8_t legatoOutputChannel = 0;
 uint8_t heldSorted[MAX_HELD_NOTES];
 uint8_t heldCount = 0;
 uint8_t arpHeldSorted[MAX_HELD_NOTES];
@@ -532,9 +582,9 @@ const int8_t kEncoderTransitionTable[16] = {
 const char *const kSettingNames[SETTING_COUNT] = {
   "1 BPM", "2 ARP MODE", "3 DIVISION", "4 VELOCITY", "5 LENGTH", "",
   "6 INPUT CH", "7 ARP CH", "8 BASS CH", "9 THRU OUT", "10 DIV NOTE",
-  "11 CC CH", "12 REMOTE", "13 EYE/PUSH", "14 EYE MODE", "15 PUSH", "16 KEY",
-  "17 SCALE", "18 GIT/KEYS", "19 REMOTE 1", "20 REMOTE 2", "21 LOAD",
-  "22 SAVE", "23 USB HOST", "24 SCRNSVR", "25 PANIC"
+  "11 LEGATO", "12 CC CH", "13 REMOTE", "14 EYE/PUSH", "15 EYE MODE", "16 PUSH", "17 KEY",
+  "18 SCALE", "19 GIT/KEYS", "20 REMOTE 1", "21 REMOTE 2", "22 LOAD",
+  "23 SAVE", "24 USB HOST", "25 SCRNSVR", "26 PANIC"
 };
 
 const char *const kArpModeNames[ARP_MODE_COUNT] = {
@@ -757,6 +807,7 @@ uint32_t divisionStepMs() {
 bool settingNeedsPanic(uint8_t settingId) {
   return settingId == SET_INPUT_CH || settingId == SET_ARP_OUT_CH ||
          settingId == SET_BASS_CH || settingId == SET_THRU_OUT_CH ||
+         settingId == SET_LEGATO_CH ||
          settingId == SET_FORCE_KEY || settingId == SET_FORCE_SCALE ||
          settingId == SET_SENSOR_CH || settingId == SET_SENSOR_MODE ||
          settingId == SET_PUSH_MODE;
@@ -1073,6 +1124,7 @@ void panicMidiOnly() {
   if (channelEnabled(mainArpOutChannel())) sendAllNoteOffChannel(mainArpOutChannel());
   if (arpChannelSpecialMode()) sendAllNoteOffChannel(10);
   if (channelEnabled(settings.thruOutChannel)) sendAllNoteOffChannel(settings.thruOutChannel);
+  if (channelEnabled(settings.legatoChannel)) sendAllNoteOffChannel(settings.legatoChannel);
   if (settings.bassMode > 0) sendAllNoteOffChannel(bassModeChannel(settings.bassMode));
   if (channelEnabled(settings.remoteChannel)) sendAllNoteOffChannel(settings.remoteChannel);
   if (channelEnabled(settings.sensorChannel)) sendAllNoteOffChannel(settings.sensorChannel);
@@ -1091,6 +1143,7 @@ void resetUsbDebugCounters() {
   usbLastRxIdx = 0xFF;
   usbLastRxMs = 0;
   usbHostBeatLastMs = 0;
+  usbHostBeatCounter = 0;
   usbSoftDropCount = 0;
   usbCriticalDropCount = 0;
   splitNoteHitCount = 0;
@@ -1151,6 +1204,16 @@ void resetHeldState() {
   memset(mappedArpOffNotes, 0xFF, sizeof(mappedArpOffNotes));
   memset(thruOutputRefCount, 0, sizeof(thruOutputRefCount));
   memset(arpOffOutputRefCount, 0, sizeof(arpOffOutputRefCount));
+  memset(legatoHeldCount, 0, sizeof(legatoHeldCount));
+  memset(legatoHeldVelocity, 0, sizeof(legatoHeldVelocity));
+  memset(legatoHeldSource, 255, sizeof(legatoHeldSource));
+  memset(legatoHeldOrder, 0, sizeof(legatoHeldOrder));
+  legatoOrderCounter = 0;
+  legatoOutputActive = false;
+  legatoOutputNote = 0xFF;
+  legatoOutputVelocity = 0;
+  legatoOutputSource = 255;
+  legatoOutputChannel = 0;
   heldCount = 0;
   arpHeldCount = 0;
   heldDrumCount = 0;
@@ -1284,7 +1347,12 @@ void updateBassVoice() {
   const uint8_t bassChannel = bassModeChannel(settings.bassMode);
   if (!channelEnabled(bassChannel) || settings.arpOutChannel == bassChannel) {
     if (currentBassOutNote >= 0) {
-      sendFanout(255, 0x80 | ((bassChannel - 1) & 0x0F), currentBassOutNote, 0);
+      const bool legatoOwnsSame = legatoOutputActive &&
+                                  legatoOutputChannel == bassChannel &&
+                                  legatoOutputNote == static_cast<uint8_t>(currentBassOutNote);
+      if (!legatoOwnsSame) {
+        sendFanout(255, 0x80 | ((bassChannel - 1) & 0x0F), currentBassOutNote, 0);
+      }
       currentBassOutNote = -1;
     }
     return;
@@ -1297,7 +1365,12 @@ void updateBassVoice() {
                               : ((heldCount > 0) ? heldSorted[0] : -1);
   if (nextSource < 0) {
     if (currentBassOutNote >= 0) {
-      sendFanout(255, 0x80 | ((bassChannel - 1) & 0x0F), currentBassOutNote, 0);
+      const bool legatoOwnsSame = legatoOutputActive &&
+                                  legatoOutputChannel == bassChannel &&
+                                  legatoOutputNote == static_cast<uint8_t>(currentBassOutNote);
+      if (!legatoOwnsSame) {
+        sendFanout(255, 0x80 | ((bassChannel - 1) & 0x0F), currentBassOutNote, 0);
+      }
       currentBassOutNote = -1;
     }
     currentBassSource = -1;
@@ -1308,7 +1381,12 @@ void updateBassVoice() {
   if (nextOut == currentBassOutNote && nextSource == currentBassSource) return;
 
   if (currentBassOutNote >= 0) {
-    sendFanout(255, 0x80 | ((bassChannel - 1) & 0x0F), currentBassOutNote, 0);
+    const bool legatoOwnsSame = legatoOutputActive &&
+                                legatoOutputChannel == bassChannel &&
+                                legatoOutputNote == static_cast<uint8_t>(currentBassOutNote);
+    if (!legatoOwnsSame) {
+      sendFanout(255, 0x80 | ((bassChannel - 1) & 0x0F), currentBassOutNote, 0);
+    }
   }
 
   currentBassSource = nextSource;
@@ -1524,6 +1602,112 @@ void noteThrough(uint8_t sourcePort, uint8_t inNote, uint8_t velocity, bool on) 
   }
 }
 
+void legatoNoteOffCurrent(uint8_t fallbackChannel = 0) {
+  if (!legatoOutputActive || legatoOutputNote > 127) return;
+  uint8_t outCh = legatoOutputChannel;
+  if (!channelEnabled(outCh)) outCh = fallbackChannel;
+  if (!channelEnabled(outCh)) outCh = settings.legatoChannel;
+  if (channelEnabled(outCh)) {
+    const uint8_t bassCh = bassModeChannel(settings.bassMode);
+    const bool bassOwnsSame = channelEnabled(bassCh) &&
+                              bassCh == outCh &&
+                              currentBassOutNote >= 0 &&
+                              static_cast<uint8_t>(currentBassOutNote) == legatoOutputNote;
+    if (!bassOwnsSame) {
+      sendFanout(legatoOutputSource, 0x80 | ((outCh - 1) & 0x0F), legatoOutputNote, 0);
+    }
+  }
+  legatoOutputActive = false;
+  legatoOutputNote = 0xFF;
+  legatoOutputVelocity = 0;
+  legatoOutputSource = 255;
+  legatoOutputChannel = 0;
+}
+
+void clearLegatoState(bool sendCurrentOff = false, uint8_t fallbackChannel = 0) {
+  if (sendCurrentOff) legatoNoteOffCurrent(fallbackChannel);
+  else {
+    legatoOutputActive = false;
+    legatoOutputNote = 0xFF;
+    legatoOutputVelocity = 0;
+    legatoOutputSource = 255;
+    legatoOutputChannel = 0;
+  }
+  memset(legatoHeldCount, 0, sizeof(legatoHeldCount));
+  memset(legatoHeldVelocity, 0, sizeof(legatoHeldVelocity));
+  memset(legatoHeldSource, 255, sizeof(legatoHeldSource));
+  memset(legatoHeldOrder, 0, sizeof(legatoHeldOrder));
+  legatoOrderCounter = 0;
+}
+
+int8_t legatoNewestHeldNote() {
+  int8_t winner = -1;
+  uint32_t newest = 0;
+  for (uint8_t note = 0; note < 128; ++note) {
+    if (legatoHeldCount[note] == 0) continue;
+    if (winner < 0 || legatoHeldOrder[note] >= newest) {
+      winner = static_cast<int8_t>(note);
+      newest = legatoHeldOrder[note];
+    }
+  }
+  return winner;
+}
+
+void handleLegatoInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t velocity, bool on) {
+  if (!channelEnabled(channel1)) return;
+  if (on && velocity > 0) {
+    legatoHeldCount[note] = 1;
+    legatoHeldVelocity[note] = velocity;
+    legatoHeldSource[note] = sourcePort;
+    legatoHeldOrder[note] = ++legatoOrderCounter;
+
+    if (legatoOutputActive && legatoOutputChannel == channel1 &&
+        legatoOutputNote == note) {
+      legatoOutputVelocity = velocity;
+      legatoOutputSource = sourcePort;
+      return;
+    }
+
+    if (legatoOutputActive) legatoNoteOffCurrent(channel1);
+    sendFanout(sourcePort, 0x90 | ((channel1 - 1) & 0x0F), note, max<uint8_t>(1, velocity));
+    legatoOutputActive = true;
+    legatoOutputNote = note;
+    legatoOutputVelocity = velocity;
+    legatoOutputSource = sourcePort;
+    legatoOutputChannel = channel1;
+    return;
+  }
+
+  // NoteOff path
+  {
+    legatoHeldCount[note] = 0;
+    legatoHeldVelocity[note] = 0;
+    legatoHeldSource[note] = sourcePort;
+    legatoHeldOrder[note] = 0;
+  }
+
+  if (!legatoOutputActive || legatoOutputChannel != channel1 || legatoOutputNote != note) {
+    return;
+  }
+
+  const int8_t winner = legatoNewestHeldNote();
+  if (winner < 0) {
+    legatoNoteOffCurrent(channel1);
+    return;
+  }
+
+  legatoNoteOffCurrent(channel1);
+  const uint8_t nextNote = static_cast<uint8_t>(winner);
+  const uint8_t nextVel = max<uint8_t>(1, legatoHeldVelocity[nextNote]);
+  const uint8_t nextSource = legatoHeldSource[nextNote];
+  sendFanout(nextSource, 0x90 | ((channel1 - 1) & 0x0F), nextNote, nextVel);
+  legatoOutputActive = true;
+  legatoOutputNote = nextNote;
+  legatoOutputVelocity = nextVel;
+  legatoOutputSource = nextSource;
+  legatoOutputChannel = channel1;
+}
+
 void clearSplitNoteFromMainPaths(uint8_t sourcePort, uint8_t note) {
   heldInputNotes[note] = false;
   heldVelocities[note] = 0;
@@ -1566,6 +1750,7 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_BASS_CH: return 48;
     case SET_THRU_OUT_CH: return 16;
     case SET_DIV_NOTES: return DIV_NOTE_RESET_SLOT;
+    case SET_LEGATO_CH: return 16;
     case SET_CC_OUT_CH: return 17;
     case SET_REMOTE_CH: return 16;
     case SET_SENSOR_CH: return 16;
@@ -1597,6 +1782,7 @@ int16_t getSettingValueRaw(uint8_t settingId) {
     case SET_BASS_CH: return settings.bassMode;
     case SET_THRU_OUT_CH: return settings.thruOutChannel;
     case SET_DIV_NOTES: return divNotesCursor;
+    case SET_LEGATO_CH: return settings.legatoChannel;
     case SET_CC_OUT_CH: return settings.ccOutChannel;
     case SET_REMOTE_CH: return settings.remoteChannel;
     case SET_SENSOR_CH: return settings.sensorChannel;
@@ -1635,6 +1821,12 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
     case SET_BASS_CH: settings.bassMode = clampU8(value, 0, 48); break;
     case SET_THRU_OUT_CH: settings.thruOutChannel = clampU8(value, 0, 16); break;
     case SET_DIV_NOTES: divNotesCursor = clampU8(value, 0, DIV_NOTE_RESET_SLOT); break;
+    case SET_LEGATO_CH: {
+      const uint8_t previous = settings.legatoChannel;
+      settings.legatoChannel = clampU8(value, 0, 16);
+      if (settings.legatoChannel != previous) clearLegatoState(true, previous);
+      break;
+    }
     case SET_CC_OUT_CH: settings.ccOutChannel = clampU8(value, 1, 17); break;
     case SET_REMOTE_CH: settings.remoteChannel = clampU8(value, 1, 16); break;
     case SET_SENSOR_CH: settings.sensorChannel = clampU8(value, 1, 16); break;
@@ -1746,6 +1938,7 @@ void sanitizeSettings(Settings &s) {
   s.arpOutChannel = clampU8(s.arpOutChannel, 0, 20);
   s.bassMode = clampU8(s.bassMode, 0, 48);
   s.thruOutChannel = clampU8(s.thruOutChannel, 0, 16);
+  s.legatoChannel = clampU8(s.legatoChannel, 0, 16);
   s.ccOutChannel = clampU8(s.ccOutChannel, 1, 17);
   s.remoteChannel = clampU8(s.remoteChannel, 1, 16);
   s.sensorChannel = clampU8(s.sensorChannel, 1, 16);
@@ -1799,6 +1992,7 @@ Settings defaultSettings() {
   s.arpOutChannel = 17;
   s.bassMode = 0;
   s.thruOutChannel = 2;
+  s.legatoChannel = 0;
   s.ccOutChannel = 17;
   s.remoteChannel = 16;
   s.sensorChannel = 3;
@@ -1821,10 +2015,34 @@ Settings defaultSettings() {
   return s;
 }
 
+Settings migrateSettingsV1(const SettingsV1 &oldSettings) {
+  Settings upgraded{};
+  memcpy(&upgraded, &oldSettings, sizeof(SettingsV1));
+  upgraded.legatoChannel = 0;
+  sanitizeSettings(upgraded);
+  return upgraded;
+}
+
 void initStorageIfNeeded() {
   EEPROM.begin(EEPROM_BYTES);
-  EEPROM.get(0, storage);
-  if (storage.magic != EEPROM_MAGIC) {
+  uint16_t storedMagic = 0;
+  EEPROM.get(0, storedMagic);
+
+  if (storedMagic == EEPROM_MAGIC) {
+    EEPROM.get(0, storage);
+  } else if (storedMagic == EEPROM_MAGIC_V1) {
+    StorageImageV1 legacy{};
+    EEPROM.get(0, legacy);
+    storage.magic = EEPROM_MAGIC;
+    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
+    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
+      storage.presets[i] = migrateSettingsV1(legacy.presets[i]);
+      storage.presets[i].loadPreset = i;
+      storage.presets[i].savePreset = i;
+    }
+    EEPROM.put(0, storage);
+    EEPROM.commit();
+  } else {
     storage.magic = EEPROM_MAGIC;
     storage.currentPreset = 0;
     for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
@@ -2071,7 +2289,11 @@ void onInputNote(uint8_t sourcePort, uint8_t channel1, uint8_t note, uint8_t vel
   }
 
   if (channel1 != settings.inputChannel) {
-    sendFanout(sourcePort, (on ? 0x90 : 0x80) | ((channel1 - 1) & 0x0F), note, velocity);
+    if (channelEnabled(settings.legatoChannel) && channel1 == settings.legatoChannel) {
+      handleLegatoInputNote(sourcePort, channel1, note, velocity, on);
+    } else {
+      sendFanout(sourcePort, (on ? 0x90 : 0x80) | ((channel1 - 1) & 0x0F), note, velocity);
+    }
     return;
   }
 
@@ -2442,6 +2664,7 @@ void beginUsbHost() {
 }
 
 void loop1() {
+  usbHostBeatCounter++;
   usbHostBeatLastMs = millis();
   taskUsbHost();
 }
@@ -2784,7 +3007,6 @@ void applyArpFreezeSnapshot(bool plusMode) {
   arpFreezeActive = true;
   arpFreezePlusActive = plusMode;
   rebuildArpHeldSorted();
-  restartArpTiming(false);
   updateBassVoice();
 }
 
@@ -3036,6 +3258,7 @@ String settingValueString(uint8_t id) {
       if (v == DIV_NOTE_PLUS_SLOT) return "+NOTE";
       if (v >= DIV_NOTE_RESET_SLOT) return "RESET";
       return kDivisionNames[divNoteSlotToDivision(v)];
+    case SET_LEGATO_CH: return midiChannelLabel(v, true);
     case SET_CC_OUT_CH: return ccChannelLabel(v);
     case SET_REMOTE_CH: return midiChannelLabel(v);
     case SET_SENSOR_CH: return midiChannelLabel(v);
@@ -3474,12 +3697,43 @@ void drawUsbDebugScreen() {
   }
 }
 
+bool arpPlaybackActive() {
+  return arpHeldCount > 0 || heldDrumCount > 0 ||
+         activeArpCount > 0 || activeDrumArpCount > 0 ||
+         arpGateOffMs != 0 || arpNextStepMs != 0;
+}
+
+bool freezeOrLatchArpPlaybackActive() {
+  const bool modeActive = arpFreezeActive || arpFreezePlusActive || arpLatchEnabled();
+  return modeActive && arpPlaybackActive();
+}
+
 void monitorUsbHostStall() {
-  if (!usbHostEnabled() || !usbHostStarted || usbAnyMountedCount == 0) return;
+  static uint32_t lastBeatCounter = 0;
+  static uint32_t lastBeatSeenMs = 0;
+
+  if (!usbHostEnabled() || !usbHostStarted || usbAnyMountedCount == 0) {
+    lastBeatCounter = usbHostBeatCounter;
+    lastBeatSeenMs = 0;
+    return;
+  }
   const uint32_t now = millis();
-  if ((now - ui.lastActivityMs) < SCREEN_SAVER_IDLE_MS) return;
-  if (usbHostBeatLastMs == 0) return;
-  const uint32_t beatAge = now - usbHostBeatLastMs;
+  const uint32_t beatCounter = usbHostBeatCounter;
+  if (beatCounter != lastBeatCounter) {
+    lastBeatCounter = beatCounter;
+    lastBeatSeenMs = now;
+    return;
+  }
+  if (lastBeatSeenMs == 0) lastBeatSeenMs = now;
+  if (freezeOrLatchArpPlaybackActive()) {
+    lastBeatSeenMs = now;
+    return;
+  }
+  if (usbLastRxIdx != 0xFF && (now - usbLastRxMs) < USB_HOST_LOOP_STALL_MS) {
+    lastBeatSeenMs = now;
+    return;
+  }
+  const uint32_t beatAge = now - lastBeatSeenMs;
   if (beatAge < USB_HOST_LOOP_STALL_MS) return;
   panicRestartHostAndResumeUi(ui.selectedSetting);
 }
@@ -3520,6 +3774,9 @@ void renderMainTop() {
       break;
     case SET_DIV_NOTES:
       drawDivNotesScreen(v);
+      break;
+    case SET_LEGATO_CH:
+      drawChannelScreen(F("LEGATO"), v, true);
       break;
     case SET_CC_OUT_CH:
       drawCcChannelScreen(v);
@@ -3781,7 +4038,9 @@ void loop() {
   pollEncoder();
   pollPedals();
   DinMIDI.read();
+#if ARPNMIDI_ENABLE_USB_HOST
   drainUsbMessageQueue(8);
+#endif
   monitorUsbHostStall();
   pollSensor();
   pollPush();

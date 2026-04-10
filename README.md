@@ -1,7 +1,18 @@
 ARPnMIDI
 ========
 
-RP2040 Zero MIDI router / arpeggiator / processor / multitool.
+****RP2040 Zero MIDI router / arpeggiator / processor / multitool.****
+
+with SSD1306 OLED display (2-color recommended, yellow on the bottom)
+
+Connect multiple usb midi devices with a hub. Output din/trs or usb midi.
+
+Control live parameters and the appegiator with:
+
+* optical distance sensor (VL53L0X)
+* push force pressure sensor (FSR402 sensor with LM393 module)
+
+You can also add a Promicro board as a usb midi device, for full usb-to-usb rounting to another usb host. use this file for the promicro: promicro_usb_din_midi_bridge.txt
 
 This repo keeps the main sketch as `arpnmidi.txt` (not `.ino`) so you can paste it into Arduino IDE without changing board profile/project behavior.
 
@@ -10,8 +21,8 @@ Current Hardware Pin Map (RP2040 Zero board labels)
 
 Use the pin numbers exactly as printed on the RP2040 Zero board:
 
-- `0` DIN MIDI OUT (TX to DIN chain / Pro Micro bridge input)
-- `1` DIN MIDI IN (RX from DIN chain / Pro Micro bridge output)
+- `0` DIN MIDI OUT (TX to DIN/TRS out + Pro Micro RX pin)
+- `1` DIN MIDI IN (RX from DIN/TRS with optocoupler or Pro Micro TX pin WITH RESISTORS. 10k from tx to rx pins, 20k from tx to gnd)
 - `2` I2C SDA (SSD1306 + VL53L0X on same bus)
 - `3` I2C SCL (SSD1306 + VL53L0X on same bus)
 - `6` Rotary encoder A
@@ -21,17 +32,19 @@ Use the pin numbers exactly as printed on the RP2040 Zero board:
 - `10` Foot pedal 2 input (active low, uses pull-up)
 - `14` USB host D+
 - `15` USB host D-
-- `26` Push/pressure analog sensor input
+- `26` Push/pressure analog sensor input (FSR402 sensor with LM393 module)
 
-Pin `11` is intentionally unused.
+Pin `11` is intentionally unused, so we can put a screw there.
 
 Build Notes
 -----------
 
+BOARD SETUP
 - Board: `Waveshare RP2040 Zero`
 - USB stack: `Adafruit TinyUSB`
-- CPU: `120 MHz` or `240 MHz`
-- USB host uses PIO-USB on pins `14/15`.
+- CPU: `240 MHz` ONLY
+
+- midi USB host uses PIO-USB on pins `14/15`.
 - `Adafruit_NeoPixel` must stay disabled in this sketch while USB host is enabled (`ARPNMIDI_ENABLE_RGB_LED 0`), because it conflicts with PIO-USB state machines.
 - `Pico-PIO-USB` is vendored in `vendor/Pico-PIO-USB` (tag `0.7.1`) and must be available to Arduino.
 - TinyUSB host MIDI support in the installed Arduino-Pico core must define:
@@ -47,23 +60,23 @@ Runtime Controls
 - Hold encoder button for 2 seconds: panic + host restart/reboot path.
 - Screen saver wake: first input only wakes; it does not also apply a parameter change.
 
-Persistence and Presets
+Saving Presets
 -----------------------
 
 - Flash-backed EEPROM stores 16 presets.
-- Exiting edit mode saves changes to the current preset.
-- `LOAD` applies selected slot when you click back from edit to select.
+- Exiting any parameter editing AUTO SAVES changes to the current preset.
+- `LOAD` loads the selected slot when you click back from edit to select.
 - `SAVE` writes current settings into selected slot when you click back from edit to select.
 - Factory reset at boot:
   - Hold encoder button during boot.
   - Release when prompted.
   - Press again within 5 seconds to confirm.
 
-Routing Rules (Current)
------------------------
+Routing Rules
+-------------
 
 - Input notes on channels other than `INPUT CH` pass through unchanged.
-- Input notes on `INPUT CH` are processed by arp/thru/bass paths.
+- If `LEGATO` is set to a channel, notes on that non-`INPUT CH` channel use mono last-note-priority handoff instead of plain passthrough.
 - `CC`, `Pitch Bend`, `Program Change`, and `Channel Aftertouch` arriving on `INPUT CH` route to `CC CH` target(s).
 - Non-input-channel `CC/PB/Program/Aftertouch` pass through unchanged.
 - Real-time MIDI bytes (clock/start/stop/etc.) are forwarded.
@@ -153,20 +166,28 @@ Comprehensive Menu Reference (All Screens)
   - If `+NOTE` has a note value, mapped trigger note is replaced by `+NOTE` and then processed normally.
 - `RESET` clears all division-note mappings and `+NOTE` when you exit edit mode on `RESET`.
 
-11. `CC CH`
+11. `LEGATO`
+- Options: `OFF`, `CH 1..CH 16`.
+- Applies to note messages on the selected non-`INPUT CH` lane.
+- Behavior: monophonic last-note priority with explicit handoff:
+  - newest pressed note becomes active output
+  - releasing that note re-activates the previous still-held note
+  - when no held notes remain, output note is released
+
+12. `CC CH`
 - Options: `CH 1..CH 16`, `ALL3`.
 - Affects routing of input-channel `CC`, `Pitch Bend`, `Program Change`, and `Channel Aftertouch`.
 - `ALL3` fans these messages to arp/thru/bass channel outputs (de-duplicated).
 
-12. `REMOTE`
+13. `REMOTE`
 - Options: `CH 1..CH 16`.
 - Output channel used by both foot pedal remote actions (`REMOTE 1` and `REMOTE 2`).
 
-13. `EYE/PUSH`
+14. `EYE/PUSH`
 - Options: `CH 1..CH 16`.
 - Shared output channel for both `EYE MODE` and `PUSH` generated notes/cc/pitch/loop messages.
 
-14. `EYE MODE`
+15. `EYE MODE`
 - Modes:
   - `OFF`
   - `DIV +2`, `DIV -2`, `DIV +3`, `DIV -3`, `DIV FULL`, `DIV3`
@@ -179,27 +200,27 @@ Comprehensive Menu Reference (All Screens)
   - `LOOP TRIG`
 - Division overlay modes currently target `DIVISION` only.
 - `DIV3` profile: far zone most-slowing, middle less-slowing, close small zone speed-up.
-- `ARP LATCH`: latch arp notes; close-half gesture clears latch phrase.
+- `ARP LATCH`: latch arp notes; wave over sensor to clear latch phrase.
 - `ARP LATCH+`: latch arp plus thru/bass behavior.
-- `ARP FREEZE`: close-half gesture snapshots currently held notes into frozen arp set.
+- `ARP FREEZE`: wave over sensor to lock notes into frozen arp set.
 - `ARP FREEZ+`: freeze mode with thru path freeze support as well.
 - `NOTES Cx`: quantized note output with edge padding and range trims.
 - `LOOP TRIG`: sends note `103` or `104` pulse based on proximity.
 
-15. `PUSH`
+16. `PUSH`
 - Same mode list and behavior family as `EYE MODE`.
 - Input source is analog pressure on pin `26`.
 - Uses calibrated thresholds and curved response so light press is less aggressive.
 - Shares channel with `EYE/PUSH` setting.
 
-16. `KEY`
+17. `KEY`
 - Options:
   - `OFF`
   - standard key roots: `C..B`
   - alternate white-key mapper roots: `CKEY C..CKEY B`
 - `CKEY` engages white-key-to-scale-position mapping.
 
-17. `SCALE`
+18. `SCALE`
 - Options:
   - `OFF`
   - `MAJOR`
@@ -208,48 +229,47 @@ Comprehensive Menu Reference (All Screens)
   - `BLUES`
   - `MAJ BLUES`
   - `BLUES+BOTH`
-  - `HARM MIN`
-  - `MEL MIN`
+- `HARM MIN`
+- `MEL MIN`
 - In `CKEY` mode, combo scales are skipped (`MAJ+MIN`, `BLUES+BOTH`).
 
-18. `GIT/KEYS`
+19. `GIT/KEYS`
 - Options: `GUITAR`, `PIANO`.
 - Chooses visualization style for key/scale pages.
 - Saved in preset and restored on boot/load.
 
-19. `REMOTE 1`
+20. `REMOTE 1`
 - Action sent when pedal 1 goes low.
 - Value mapping:
   - `0..127` => note number pulse
   - `128..254` => CC `1..127` pulse
 - Pulse length uses project pedal pulse timing.
 
-20. `REMOTE 2`
+21. `REMOTE 2`
 - Same action model as `REMOTE 1`, for pedal 2.
 
-21. `LOAD`
+22. `LOAD`
 - Select preset slot `1..16` in edit mode.
 - Preset is actually loaded when you click back to select mode.
 - Grid view shows slot location.
 
-22. `SAVE`
+23. `SAVE`
 - Select destination slot `1..16` in edit mode.
 - Slot is written when you click back to select mode.
 - Grid view shows slot location.
 
-23. `USB HOST`
+24. `USB HOST`
 - Options: `OFF`, `IN ONLY`, `IN/OUT`.
 - Changing this setting reboots after exiting edit mode so host stack restarts cleanly.
 - `IN/OUT` enables USB host TX fanout as well as input.
 
-24. `SCRNSVR`
+25. `SCRNSVR`
 - Options: `OFF`, `AUTO`, `NOW`.
 - `AUTO`: enters after idle timeout.
 - `NOW`: immediate manual activation (not persisted as always-on).
 - Saver redraws procedurally and refreshes on interval.
 
-25. `PANIC`
-- Click action: sends all-notes-off/all-sound-off for active outputs, clears held states, and restarts host/reboots path as needed.
+26. `PANIC`
 - Top screen in this page is USB overload debug:
   - device counts
   - queue depth and drop counters
