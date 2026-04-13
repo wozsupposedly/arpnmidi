@@ -77,7 +77,7 @@ Routing Rules
 
 - Input notes on channels other than `INPUT CH` pass through unchanged.
 - If `LEGATO` is set to a channel, notes on that non-`INPUT CH` channel use mono last-note-priority handoff instead of plain passthrough.
-- `CC`, `Pitch Bend`, `Program Change`, and `Channel Aftertouch` arriving on `INPUT CH` route to `CC CH` target(s).
+- `CC`, `Pitch Bend`, `Program Change`, and `Channel Aftertouch` arriving on `INPUT CH` route to `IN CC >` target(s).
 - Non-input-channel `CC/PB/Program/Aftertouch` pass through unchanged.
 - Real-time MIDI bytes (clock/start/stop/etc.) are forwarded.
 - Current code does not auto-learn BPM from clock (`handleClockByte()` is intentionally empty right now).
@@ -166,7 +166,29 @@ Comprehensive Menu Reference (All Screens)
   - If `+NOTE` has a note value, mapped trigger note is replaced by `+NOTE` and then processed normally.
 - `RESET` clears all division-note mappings and `+NOTE` when you exit edit mode on `RESET`.
 
-11. `LEGATO`
+11. `MAP CC`
+- Cursor options:
+  - Param slots: `BPM`, `ARP`, `DIV`, `VEL`, `LEN`, `IN`, `ACH`, `BCH`, `TCH`, `INCC`, `EYCH`, `EYMD`, `PSMD`, `KEY`, `SCL`, `LOAD`
+  - `CLEAR`
+  - `CH:SET` / `CH:ALL`
+- In edit mode on a param slot, send a CC to learn that CC number and channel for that slot.
+- `EYMD` / `PSMD` mapping excludes `CC 1..CC 19` and `LOOP TRIG` options.
+- `CLEAR` clears all MAP CC assignments when you exit edit mode on `CLEAR`.
+- `CH:SET`/`CH:ALL` toggles when you exit edit mode on that row:
+  - `CH:SET`: mapped CC must match both learned CC and learned channel.
+  - `CH:ALL`: mapped CC number works from any incoming channel.
+- `LOAD` map target switches and loads preset immediately.
+- Parameter changes from MAP CC are live and persist to the current preset (same autosave behavior as normal edits).
+- MAP CC assignments are stored per preset and restore on boot/load with that preset.
+- For stepped parameters, incoming CC is thresholded to target steps to avoid jitter.
+- Display jumps to the changed parameter screen after movement settles, to avoid over-refreshing while CC is moving quickly.
+
+12. `IN CC >`
+- Options: `CH 1..CH 16`, `ALL3`.
+- Affects routing of input-channel `CC`, `Pitch Bend`, `Program Change`, and `Channel Aftertouch`.
+- `ALL3` fans these messages to arp/thru/bass channel outputs (de-duplicated).
+
+13. `LEGATO`
 - Options: `OFF`, `CH 1..CH 16`.
 - Applies to note messages on the selected non-`INPUT CH` lane.
 - Behavior: monophonic last-note priority with explicit handoff:
@@ -174,20 +196,36 @@ Comprehensive Menu Reference (All Screens)
   - releasing that note re-activates the previous still-held note
   - when no held notes remain, output note is released
 
-12. `CC CH`
-- Options: `CH 1..CH 16`, `ALL3`.
-- Affects routing of input-channel `CC`, `Pitch Bend`, `Program Change`, and `Channel Aftertouch`.
-- `ALL3` fans these messages to arp/thru/bass channel outputs (de-duplicated).
-
-13. `REMOTE`
+14. `REMOTE`
 - Options: `CH 1..CH 16`.
 - Output channel used by both foot pedal remote actions (`REMOTE 1` and `REMOTE 2`).
 
-14. `EYE/PUSH`
+15. `REMOTE 1`
+- Action sent when pedal 1 goes low.
+- Value mapping:
+  - `0..127` => note number pulse
+  - `128..254` => CC `1..127` pulse
+- Pulse length uses project pedal pulse timing.
+
+16. `REMOTE 2`
+- Same action model as `REMOTE 1`, for pedal 2.
+
+17. `USB HOST`
+- Options: `OFF`, `IN ONLY`, `IN/OUT`.
+- Changing this setting reboots after exiting edit mode so host stack restarts cleanly.
+- `IN/OUT` enables USB host TX fanout as well as input.
+
+18. `SCRNSVR`
+- Options: `OFF`, `AUTO`, `NOW`.
+- `AUTO`: enters after idle timeout.
+- `NOW`: immediate manual activation (not persisted as always-on).
+- Saver redraws procedurally and refreshes on interval.
+
+19. `EYE/PUSH`
 - Options: `CH 1..CH 16`.
 - Shared output channel for both `EYE MODE` and `PUSH` generated notes/cc/pitch/loop messages.
 
-15. `EYE MODE`
+20. `EYE MODE`
 - Modes:
   - `OFF`
   - `DIV +2`, `DIV -2`, `DIV +3`, `DIV -3`, `DIV FULL`, `DIV3`
@@ -207,20 +245,20 @@ Comprehensive Menu Reference (All Screens)
 - `NOTES Cx`: quantized note output with edge padding and range trims.
 - `LOOP TRIG`: sends note `103` or `104` pulse based on proximity.
 
-16. `PUSH`
+21. `PUSH`
 - Same mode list and behavior family as `EYE MODE`.
 - Input source is analog pressure on pin `26`.
 - Uses calibrated thresholds and curved response so light press is less aggressive.
 - Shares channel with `EYE/PUSH` setting.
 
-17. `KEY`
+22. `KEY`
 - Options:
   - `OFF`
   - standard key roots: `C..B`
   - alternate white-key mapper roots: `CKEY C..CKEY B`
 - `CKEY` engages white-key-to-scale-position mapping.
 
-18. `SCALE`
+23. `SCALE`
 - Options:
   - `OFF`
   - `MAJOR`
@@ -233,43 +271,22 @@ Comprehensive Menu Reference (All Screens)
 - `MEL MIN`
 - In `CKEY` mode, combo scales are skipped (`MAJ+MIN`, `BLUES+BOTH`).
 
-19. `GIT/KEYS`
+24. `GIT/KEYS`
 - Options: `GUITAR`, `PIANO`.
 - Chooses visualization style for key/scale pages.
 - Saved in preset and restored on boot/load.
 
-20. `REMOTE 1`
-- Action sent when pedal 1 goes low.
-- Value mapping:
-  - `0..127` => note number pulse
-  - `128..254` => CC `1..127` pulse
-- Pulse length uses project pedal pulse timing.
-
-21. `REMOTE 2`
-- Same action model as `REMOTE 1`, for pedal 2.
-
-22. `LOAD`
+25. `LOAD`
 - Select preset slot `1..16` in edit mode.
 - Preset is actually loaded when you click back to select mode.
 - Grid view shows slot location.
 
-23. `SAVE`
+26. `SAVE`
 - Select destination slot `1..16` in edit mode.
 - Slot is written when you click back to select mode.
 - Grid view shows slot location.
 
-24. `USB HOST`
-- Options: `OFF`, `IN ONLY`, `IN/OUT`.
-- Changing this setting reboots after exiting edit mode so host stack restarts cleanly.
-- `IN/OUT` enables USB host TX fanout as well as input.
-
-25. `SCRNSVR`
-- Options: `OFF`, `AUTO`, `NOW`.
-- `AUTO`: enters after idle timeout.
-- `NOW`: immediate manual activation (not persisted as always-on).
-- Saver redraws procedurally and refreshes on interval.
-
-26. `PANIC`
+27. `PANIC`
 - Top screen in this page is USB overload debug:
   - device counts
   - queue depth and drop counters
