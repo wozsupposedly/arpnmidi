@@ -1064,7 +1064,8 @@ int16_t mapCcTargetValue(uint8_t paramId, uint8_t ccValue) {
 }
 
 bool mapCcDeferredParam(uint8_t paramId) {
-  return paramId >= MAPCC_IN && paramId <= MAPCC_LOAD;
+  if (paramId >= MAPCC_IN && paramId <= MAPCC_PSMD) return true;
+  return paramId == MAPCC_LOAD;
 }
 
 void queueMapCcUiSetting(uint8_t targetSetting, bool immediate) {
@@ -1092,6 +1093,11 @@ void clearMapCcPreview(uint8_t settingId) {
 
 void panicMappedRelevantOnly(uint8_t settingId, int16_t nextValue);
 
+bool mapCcNeedsPanic(uint8_t settingId) {
+  if (settingId == SET_FORCE_KEY || settingId == SET_FORCE_SCALE) return false;
+  return settingNeedsPanic(settingId);
+}
+
 void applyMappedSettingChange(uint8_t settingId, int16_t nextValue, bool allowArpRestart,
                               bool immediateUiFocus) {
   const int16_t currentValue = getSettingValueRaw(settingId);
@@ -1100,7 +1106,7 @@ void applyMappedSettingChange(uint8_t settingId, int16_t nextValue, bool allowAr
     queueMapCcUiSetting(settingId, immediateUiFocus);
     return;
   }
-  if (settingNeedsPanic(settingId)) panicMappedRelevantOnly(settingId, nextValue);
+  if (mapCcNeedsPanic(settingId)) panicMappedRelevantOnly(settingId, nextValue);
   setSettingValueRaw(settingId, nextValue);
   if (allowArpRestart &&
       (settingId == SET_DIVISION || settingId == SET_ARP_MODE || settingId == SET_LENGTH || settingId == SET_VELOCITY)) {
@@ -1154,7 +1160,7 @@ void applyMappedCcAssignments(uint8_t channel, uint8_t control, uint8_t value) {
       queueDeferredMappedChange(i, mappedValue);
       continue;
     }
-    const bool immediateUi = (i == MAPCC_BPM);
+    const bool immediateUi = (i == MAPCC_BPM || i == MAPCC_KEY || i == MAPCC_SCL);
     const bool allowArpRestart = false;
     if (targetSetting == SET_LOAD_PRESET) applyMappedLoadPreset(mappedValue, immediateUi);
     else applyMappedSettingChange(targetSetting, mappedValue, allowArpRestart, immediateUi);
