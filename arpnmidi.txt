@@ -123,6 +123,7 @@ constexpr uint8_t USB_MSG_HIGH_WATER = USB_MSG_QUEUE_SIZE - 24;
 constexpr uint8_t USB_MSG_CRITICAL_WATER = USB_MSG_QUEUE_SIZE - 8;
 constexpr uint8_t USB_TX_QUEUE_SIZE = 128;
 constexpr uint32_t USB_HOST_LOOP_STALL_MS = 4000UL;
+constexpr uint32_t USB_HOST_SOFT_RECOVERY_WAIT_MS = 3000UL;
 constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
 constexpr uint16_t EEPROM_MAGIC_V1 = 0x4D43;
 constexpr uint16_t EEPROM_MAGIC_V2 = 0x4D44;
@@ -566,6 +567,7 @@ volatile bool usbHostStartRequested = false;
 volatile bool usbHostStarted = false;
 volatile bool usbMsgCriticalOverflow = false;
 volatile bool usbParserResetRequested = false;
+volatile bool usbHostSoftResetRequested = false;
 volatile uint8_t usbMsgHead = 0;
 volatile uint8_t usbMsgTail = 0;
 UsbQueuedMessage usbMsgQueue[USB_MSG_QUEUE_SIZE];
@@ -2700,7 +2702,9 @@ void handleDrumInputNote(uint8_t sourcePort, uint8_t note, uint8_t velocity, boo
   heldDrumNotes[note] = on && velocity > 0;
   heldDrumVelocities[note] = (on && velocity > 0) ? velocity : 0;
   rebuildHeldDrumCount();
-  if (on && velocity > 0 && hadNoDrumKeys) {
+  const bool holdPlaybackActive = arpHeldCount > 0 || activeArpCount > 0 || arpGateOffMs != 0 || arpNextStepMs != 0;
+  const bool latchOrFreezeHolding = (arpFreezeActive || arpFreezePlusActive || arpLatchEnabled()) && holdPlaybackActive;
+  if (on && velocity > 0 && hadNoDrumKeys && !latchOrFreezeHolding) {
     restartArpTiming(false);
   }
 }
@@ -3112,6 +3116,36 @@ void setupUsbHost() {
   }
 }
 
+bool recoverUsbHostStack() {
+  if (!usbHostEnabled()) return false;
+
+  usbAnyMountedCount = 0;
+  usbMidiMountedCount = 0;
+  memset(usbMidiDevices, 0, sizeof(usbMidiDevices));
+  usbMsgHead = 0;
+  usbMsgTail = 0;
+  usbTxHead = 0;
+  usbTxTail = 0;
+  usbLastRxIdx = 0xFF;
+  usbLastRxMs = 0;
+  usbUiDirty = true;
+
+  tuh_deinit(1);
+  delay(2);
+  setupUsbHost();
+  const uint32_t cpu_hz = clock_get_hz(clk_sys);
+  if (cpu_hz == 120000000UL || cpu_hz == 240000000UL) {
+    return USBHost.begin(1);
+  }
+  return false;
+}
+
+void serviceUsbHostSoftResetRequest() {
+  if (!usbHostSoftResetRequested) return;
+  usbHostSoftResetRequested = false;
+  recoverUsbHostStack();
+}
+
 void taskUsbHost() {
   if (!usbHostEnabled()) return;
   if (usbParserResetRequested) usbParserResetRequested = false;
@@ -3140,6 +3174,7 @@ void beginUsbHost() {
 void loop1() {
   usbHostBeatCounter++;
   usbHostBeatLastMs = millis();
+  serviceUsbHostSoftResetRequest();
   taskUsbHost();
 }
 
@@ -3958,7 +3993,10 @@ void drawPianoView() {
     const int cx = blackPos[i] + 5;
     const int cy = 14;
     if (mask[blackPcs[i]]) display.fillCircle(cx, cy, 3, SSD1306_BLACK);
-    if (noteHeldInInputPc(blackPcs[i])) display.drawCircle(cx, cy, 5, SSD1306_BLACK);
+    if (noteHeldInInputPc(blackPcs[i])) {
+      display.drawCircle(cx, cy, 5, SSD1306_BLACK);
+      display.drawCircle(cx, cy, 4, SSD1306_BLACK);
+    }
   }
 }
 
@@ -4231,10 +4269,15 @@ bool freezeOrLatchArpPlaybackActive() {
 void monitorUsbHostStall() {
   static uint32_t lastBeatCounter = 0;
   static uint32_t lastBeatSeenMs = 0;
+  static bool waitingForSoftRecovery = false;
+  static uint32_t softRecoveryStartMs = 0;
 
-  if (!usbHostEnabled() || !usbHostStarted || usbAnyMountedCount == 0) {
+  if (!usbHostEnabled() || !usbHostStarted ||
+      (usbAnyMountedCount == 0 && !waitingForSoftRecovery)) {
     lastBeatCounter = usbHostBeatCounter;
     lastBeatSeenMs = 0;
+    waitingForSoftRecovery = false;
+    softRecoveryStartMs = 0;
     return;
   }
   const uint32_t now = millis();
@@ -4242,6 +4285,14 @@ void monitorUsbHostStall() {
   if (beatCounter != lastBeatCounter) {
     lastBeatCounter = beatCounter;
     lastBeatSeenMs = now;
+    waitingForSoftRecovery = false;
+    softRecoveryStartMs = 0;
+    return;
+  }
+  if (waitingForSoftRecovery) {
+    if ((now - softRecoveryStartMs) >= USB_HOST_SOFT_RECOVERY_WAIT_MS) {
+      panicRestartHostAndResumeUi(ui.selectedSetting);
+    }
     return;
   }
   if (lastBeatSeenMs == 0) lastBeatSeenMs = now;
@@ -4255,7 +4306,9 @@ void monitorUsbHostStall() {
   }
   const uint32_t beatAge = now - lastBeatSeenMs;
   if (beatAge < USB_HOST_LOOP_STALL_MS) return;
-  panicRestartHostAndResumeUi(ui.selectedSetting);
+  usbHostSoftResetRequested = true;
+  waitingForSoftRecovery = true;
+  softRecoveryStartMs = now;
 }
 
 void renderMainTop() {
