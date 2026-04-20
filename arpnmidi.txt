@@ -127,8 +127,16 @@ constexpr uint32_t USB_HOST_SOFT_RECOVERY_WAIT_MS = 3000UL;
 constexpr uint32_t UI_RESUME_MAGIC = 0x41524D44UL;  // "ARMD"
 constexpr uint16_t EEPROM_MAGIC_V1 = 0x4D43;
 constexpr uint16_t EEPROM_MAGIC_V2 = 0x4D44;
-constexpr uint16_t EEPROM_MAGIC = 0x4D45;
+constexpr uint16_t EEPROM_MAGIC_V3 = 0x4D45;
+constexpr uint16_t EEPROM_MAGIC = 0x4D46;
 constexpr size_t EEPROM_BYTES = 2048;
+constexpr uint8_t ARP_CH_1_PLUS_10 = 17;
+constexpr uint8_t ARP_CH_1_PLUS_10_AFTERTOUCH = 18;
+constexpr uint8_t ARP_CH_1_TO_10_SPLIT_24 = 19;
+constexpr uint8_t ARP_CH_1_TO_10_SPLIT_36 = 20;
+constexpr uint8_t ARP_CH_1_TO_10_SPLIT_48 = 21;
+constexpr uint8_t ARP_CH_MAX = ARP_CH_1_TO_10_SPLIT_48;
+constexpr uint8_t DRUM_AFTERTOUCH_MIN_VELOCITY = 42;  // 33% floor.
 
 decltype(Serial1) &DinSerial = Serial1;
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, DinMIDI);
@@ -592,6 +600,7 @@ volatile uint8_t drumLastOutNote = 0xFF;
 volatile uint16_t usbHostNoteHitCount = 0;
 volatile uint8_t usbHostLastInputCh = 0xFF;
 volatile uint8_t usbHostLastInputNote = 0xFF;
+uint8_t drumAftertouchPressure = 127;
 
 bool heldInputNotes[128];
 uint8_t heldVelocities[128];
@@ -822,7 +831,11 @@ bool channelEnabled(uint8_t chSetting) {
 }
 
 bool arpChannelSpecialMode() {
-  return settings.arpOutChannel >= 17;
+  return settings.arpOutChannel >= ARP_CH_1_PLUS_10;
+}
+
+bool arpChannelAftertouchMode() {
+  return settings.arpOutChannel == ARP_CH_1_PLUS_10_AFTERTOUCH;
 }
 
 bool usbHostEnabled() {
@@ -834,18 +847,20 @@ bool usbHostOutputEnabled() {
 }
 
 bool arpChannelSplitMode() {
-  return settings.arpOutChannel == 18 || settings.arpOutChannel == 19 || settings.arpOutChannel == 20;
+  return settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_24 ||
+         settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_36 ||
+         settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_48;
 }
 
 uint8_t splitDrumStartNote() {
-  if (settings.arpOutChannel == 18) return 24;
-  if (settings.arpOutChannel == 19) return 36;
+  if (settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_24) return 24;
+  if (settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_36) return 36;
   return 48;
 }
 
 uint8_t splitDrumOutputNote(uint8_t note) {
-  if (settings.arpOutChannel == 18) return static_cast<uint8_t>(note + 12);
-  if (settings.arpOutChannel == 20) return static_cast<uint8_t>(note - 12);
+  if (settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_24) return static_cast<uint8_t>(note + 12);
+  if (settings.arpOutChannel == ARP_CH_1_TO_10_SPLIT_48) return static_cast<uint8_t>(note - 12);
   return note;
 }
 
@@ -926,10 +941,11 @@ bool settingNeedsPanic(uint8_t settingId) {
 
 String midiChannelLabel(uint8_t value, bool allowOff = false) {
   if (allowOff && value == 0) return "OFF";
-  if (value == 17) return "1+10";
-  if (value == 18) return "1-10 24";
-  if (value == 19) return "1-10 36";
-  if (value == 20) return "1-10 48";
+  if (value == ARP_CH_1_PLUS_10) return "1+10";
+  if (value == ARP_CH_1_PLUS_10_AFTERTOUCH) return "1+10-A";
+  if (value == ARP_CH_1_TO_10_SPLIT_24) return "1-10 24";
+  if (value == ARP_CH_1_TO_10_SPLIT_36) return "1-10 36";
+  if (value == ARP_CH_1_TO_10_SPLIT_48) return "1-10 48";
   return "CH " + String(value);
 }
 
@@ -979,7 +995,7 @@ void mapCcApplyPersistBaseline(Settings &s, uint8_t settingId, int16_t value) {
     case SET_VELOCITY: s.arpVelocity = clampU8(value, 1, 127); break;
     case SET_LENGTH: s.arpLengthPct = clampU8(value, 1, 100); break;
     case SET_INPUT_CH: s.inputChannel = clampU8(value, 1, 16); break;
-    case SET_ARP_OUT_CH: s.arpOutChannel = clampU8(value, 0, 20); break;
+    case SET_ARP_OUT_CH: s.arpOutChannel = clampU8(value, 0, ARP_CH_MAX); break;
     case SET_BASS_CH: s.bassMode = clampU8(value, 0, 48); break;
     case SET_THRU_OUT_CH: s.thruOutChannel = clampU8(value, 0, 16); break;
     case SET_CC_OUT_CH: s.ccOutChannel = clampU8(value, 1, 17); break;
@@ -1051,7 +1067,7 @@ int16_t mapCcTargetValue(uint8_t paramId, uint8_t ccValue) {
     case MAPCC_VEL: return mapCcLinearValue(ccValue, 1, 127);
     case MAPCC_LEN: return mapCcLinearValue(ccValue, 1, 100);
     case MAPCC_IN: return mapCcLinearValue(ccValue, 1, 16);
-    case MAPCC_ACH: return mapCcLinearValue(ccValue, 0, 20);
+    case MAPCC_ACH: return mapCcLinearValue(ccValue, 0, ARP_CH_MAX);
     case MAPCC_BCH: return mapCcLinearValue(ccValue, 0, 48);
     case MAPCC_TCH: return mapCcLinearValue(ccValue, 0, 16);
     case MAPCC_INCC: return mapCcLinearValue(ccValue, 1, 17);
@@ -1501,7 +1517,7 @@ void addUniqueChannel(uint8_t *list, uint8_t &count, uint8_t ch1) {
 }
 
 uint8_t mainArpOutChannelForSettings(const Settings &s) {
-  return (s.arpOutChannel >= 17) ? 1 : s.arpOutChannel;
+  return (s.arpOutChannel >= ARP_CH_1_PLUS_10) ? 1 : s.arpOutChannel;
 }
 
 void collectRelevantPanicChannels(const Settings &s, uint8_t *channels, uint8_t &count) {
@@ -1637,6 +1653,7 @@ void resetHeldState() {
   heldCount = 0;
   arpHeldCount = 0;
   heldDrumCount = 0;
+  drumAftertouchPressure = 127;
   arpModeCursor = 0;
   arpPatternStep = 0;
   arpPendulumUp = true;
@@ -2166,7 +2183,7 @@ int16_t settingRangeMax(uint8_t settingId) {
     case SET_LENGTH: return 100;
     case SET_PATTERN: return PATTERN_COUNT - 1;
     case SET_INPUT_CH: return 16;
-    case SET_ARP_OUT_CH: return 20;
+    case SET_ARP_OUT_CH: return ARP_CH_MAX;
     case SET_BASS_CH: return 48;
     case SET_THRU_OUT_CH: return 16;
     case SET_DIV_NOTES: return DIV_NOTE_RESET_SLOT;
@@ -2237,7 +2254,7 @@ void setSettingValueRaw(uint8_t settingId, int16_t value) {
     case SET_PATTERN: settings.pattern = clampU8(value, 0, PATTERN_COUNT - 1); break;
     case SET_INPUT_CH: settings.inputChannel = clampU8(value, 1, 16); break;
     case SET_ARP_OUT_CH:
-      settings.arpOutChannel = clampU8(value, 0, 20);
+      settings.arpOutChannel = clampU8(value, 0, ARP_CH_MAX);
       resetUsbDebugCounters();
       break;
     case SET_BASS_CH: settings.bassMode = clampU8(value, 0, 48); break;
@@ -2359,7 +2376,7 @@ void sanitizeSettings(Settings &s) {
   s.arpVelocity = clampU8(s.arpVelocity, 1, 127);
   s.arpLengthPct = clampU8(s.arpLengthPct, 1, 100);
   s.inputChannel = clampU8(s.inputChannel, 1, 16);
-  s.arpOutChannel = clampU8(s.arpOutChannel, 0, 20);
+  s.arpOutChannel = clampU8(s.arpOutChannel, 0, ARP_CH_MAX);
   s.bassMode = clampU8(s.bassMode, 0, 48);
   s.thruOutChannel = clampU8(s.thruOutChannel, 0, 16);
   s.legatoChannel = clampU8(s.legatoChannel, 0, 16);
@@ -2426,7 +2443,7 @@ Settings defaultSettings() {
   s.arpLengthPct = 55;
   s.pattern = PAT_MODE;
   s.inputChannel = 1;
-  s.arpOutChannel = 17;
+  s.arpOutChannel = ARP_CH_1_PLUS_10;
   s.bassMode = 0;
   s.thruOutChannel = 2;
   s.legatoChannel = 0;
@@ -2469,6 +2486,16 @@ Settings migrateSettingsV2(const SettingsV2 &oldSettings) {
   return upgraded;
 }
 
+Settings migrateSettingsV3(const Settings &oldSettings) {
+  Settings upgraded = oldSettings;
+  if (upgraded.arpOutChannel >= ARP_CH_1_PLUS_10_AFTERTOUCH &&
+      upgraded.arpOutChannel <= ARP_CH_1_TO_10_SPLIT_36) {
+    upgraded.arpOutChannel = static_cast<uint8_t>(upgraded.arpOutChannel + 1);
+  }
+  sanitizeSettings(upgraded);
+  return upgraded;
+}
+
 Settings migrateSettingsV1(const SettingsV1 &oldSettings) {
   Settings upgraded{};
   memcpy(&upgraded, &oldSettings, sizeof(SettingsV1));
@@ -2489,6 +2516,18 @@ void initStorageIfNeeded() {
 
   if (storedMagic == EEPROM_MAGIC) {
     EEPROM.get(0, storage);
+  } else if (storedMagic == EEPROM_MAGIC_V3) {
+    StorageImage legacy{};
+    EEPROM.get(0, legacy);
+    storage.magic = EEPROM_MAGIC;
+    storage.currentPreset = clampU8(legacy.currentPreset, 0, PRESET_COUNT - 1);
+    for (uint8_t i = 0; i < PRESET_COUNT; ++i) {
+      storage.presets[i] = migrateSettingsV3(legacy.presets[i]);
+      storage.presets[i].loadPreset = i;
+      storage.presets[i].savePreset = i;
+    }
+    EEPROM.put(0, storage);
+    EEPROM.commit();
   } else if (storedMagic == EEPROM_MAGIC_V2) {
     StorageImageV2 legacy{};
     EEPROM.get(0, legacy);
@@ -2886,6 +2925,11 @@ void routeProgramLikeMessage(uint8_t sourcePort, uint8_t status, uint8_t data1, 
   });
 }
 
+void routeChannelAftertouch(uint8_t sourcePort, uint8_t channel, uint8_t pressure) {
+  if (channel == 10) drumAftertouchPressure = pressure;
+  routeProgramLikeMessage(sourcePort, 0xD0 | ((channel - 1) & 0x0F), pressure, 0);
+}
+
 void handleDinPb(byte channel, int bend) {
   routePitchBend(0, channel, bend);
 }
@@ -2895,7 +2939,7 @@ void handleDinProgramChange(byte channel, byte number) {
 }
 
 void handleDinAfterTouchChannel(byte channel, byte pressure) {
-  routeProgramLikeMessage(0, 0xD0 | ((channel - 1) & 0x0F), pressure, 0);
+  routeChannelAftertouch(0, channel, pressure);
 }
 
 void handleDinClock() {
@@ -2920,7 +2964,9 @@ void routeIncomingChannelMessage(uint8_t sourcePort, uint8_t status, uint8_t dat
     routeControlChange(sourcePort, channel, data1, data2);
   } else if (type == 0xE0) {
     routePitchBend(sourcePort, channel, static_cast<int>(data1 | (data2 << 7)) - 8192);
-  } else if (type == 0xC0 || type == 0xD0 || type == 0xA0) {
+  } else if (type == 0xD0) {
+    routeChannelAftertouch(sourcePort, channel, data1);
+  } else if (type == 0xC0 || type == 0xA0) {
     routeProgramLikeMessage(sourcePort, status, data1, data2);
   }
 }
@@ -3322,7 +3368,13 @@ void drumArpNoteOffs() {
   activeDrumArpCount = 0;
 }
 
-void drumArpAddOutput(uint8_t note, uint8_t velocity) {
+uint8_t drumArpPulseVelocity() {
+  if (!arpChannelAftertouchMode()) return 127;
+  const long mapped = map(drumAftertouchPressure, 0, 127, DRUM_AFTERTOUCH_MIN_VELOCITY, 127);
+  return static_cast<uint8_t>(constrain(mapped, DRUM_AFTERTOUCH_MIN_VELOCITY, 127));
+}
+
+void drumArpAddOutput(uint8_t note) {
   if (!arpChannelSpecialMode()) return;
   if (activeDrumArpCount >= MAX_HELD_NOTES) return;
   for (uint8_t i = 0; i < activeDrumArpCount; ++i) {
@@ -3331,7 +3383,7 @@ void drumArpAddOutput(uint8_t note, uint8_t velocity) {
   activeDrumArpNotes[activeDrumArpCount++] = note;
   drumOutHitCount++;
   drumLastOutNote = note;
-  sendFanout(255, 0x90 | (10 - 1), note, 127);
+  sendFanout(255, 0x90 | (10 - 1), note, drumArpPulseVelocity());
 }
 
 void runArpStep() {
@@ -3357,7 +3409,7 @@ void runArpStep() {
     arpPatternStep = (arpPatternStep + 1) % 16;
     if (drumArpEnabled) {
       for (uint8_t note = 0; note < 128; ++note) {
-        if (heldDrumNotes[note]) drumArpAddOutput(note, heldDrumVelocities[note] ? heldDrumVelocities[note] : currentArpVelocitySetting());
+        if (heldDrumNotes[note]) drumArpAddOutput(note);
       }
       arpGateOffMs = millis() + max<uint32_t>(15, (divisionStepMs() * currentArpLengthPctSetting()) / 100);
     }
@@ -3384,7 +3436,7 @@ void runArpStep() {
   if (drumArpEnabled) {
     for (uint8_t note = 0; note < 128; ++note) {
       if (heldDrumNotes[note]) {
-        drumArpAddOutput(note, heldDrumVelocities[note] ? heldDrumVelocities[note] : currentArpVelocitySetting());
+        drumArpAddOutput(note);
       }
     }
   }
@@ -4031,19 +4083,23 @@ void drawChannelScreen(const __FlashStringHelper *title, int channel, bool allow
     display.setTextSize(3);
     display.setCursor(0, 18);
     display.print(F("OFF"));
-  } else if (channel == 17) {
+  } else if (channel == ARP_CH_1_PLUS_10) {
     display.setTextSize(3);
     display.setCursor(0, 18);
     display.print(F("1+10"));
-  } else if (channel == 18) {
+  } else if (channel == ARP_CH_1_PLUS_10_AFTERTOUCH) {
+    display.setTextSize(3);
+    display.setCursor(0, 18);
+    display.print(F("1+10-A"));
+  } else if (channel == ARP_CH_1_TO_10_SPLIT_24) {
     display.setTextSize(3);
     display.setCursor(0, 18);
     display.print(F("1-10 24"));
-  } else if (channel == 19) {
+  } else if (channel == ARP_CH_1_TO_10_SPLIT_36) {
     display.setTextSize(3);
     display.setCursor(0, 18);
     display.print(F("1-10 36"));
-  } else if (channel == 20) {
+  } else if (channel == ARP_CH_1_TO_10_SPLIT_48) {
     display.setTextSize(3);
     display.setCursor(0, 18);
     display.print(F("1-10 48"));

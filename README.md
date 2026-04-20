@@ -133,15 +133,17 @@ Comprehensive Menu Reference (All Screens)
   - `OFF`
   - `CH 1..CH 16`
   - `1+10`
+  - `1+10-A`
   - `1-10 24`
   - `1-10 36`
   - `1-10 48`
 - `1+10`: main arp on ch1 path plus drum-chord arp lane on ch10.
+- `1+10-A`: same as `1+10`, plus ch10 channel aftertouch controls new ch10 drum-lane arp pulse velocity (33% minimum, `42..127`).
 - `1-10 24/36/48`: same as `1+10`, plus 8-note split from input channel to ch10 drum lane:
   - `1-10 24`: input notes `24..31` remap to ch10 `36..43`
   - `1-10 36`: input notes `36..43` remap to ch10 `36..43`
   - `1-10 48`: input notes `48..55` remap to ch10 `36..43`
-- Drum lane velocity is forced to max (`127`).
+- Drum lane velocity is forced to max (`127`) for `1+10` and `1-10 24/36/48`.
 
 8. `BASS CH`
 - Options: `OFF`, then channel groups for `CH1..CH12`.
@@ -252,6 +254,7 @@ Comprehensive Menu Reference (All Screens)
 - Shares channel with `EYE/PUSH` setting.
 
 22. `KEY`
+	**WARNING while on key/guitar screens like this, rapid notes will slow the arp due to refreshing the display**
 - Options:
   - `OFF`
   - standard key roots: `C..B`
@@ -288,6 +291,7 @@ Comprehensive Menu Reference (All Screens)
 
 27. `PANIC`
 - Top screen in this page is USB overload debug:
+	**WARNING if you stay on this screen, rapid notes will slow the arp due to refreshing the display**
   - device counts
   - queue depth and drop counters
   - overload risk flag
