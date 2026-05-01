@@ -843,7 +843,7 @@ const char *const kSensorModeNames[SENSOR_MODE_COUNT] = {
   "NOTES C4", "NOTES C5", "NOTES C6", "NOTES C7",
   "CC 1", "CC 2", "CC 3", "CC 4", "CC 5", "CC 6", "CC 7", "CC 8", "CC 9",
   "CC 10", "CC 11", "CC 12", "CC 13", "CC 14", "CC 15", "CC 16", "CC 17", "CC 18", "CC 19",
-  "CC103", "LoopRecPlay", "LoopStopDel"
+  "CC103", "Loop Rec/\nPlay/Over", "Loop Stop/\nDelete"
 };
 
 const char *const kUsbHostModeNames[USB_HOST_MODE_COUNT] = {
@@ -1496,6 +1496,13 @@ void drawWrappedTopValue(const String &text) {
   String remaining = text;
 
   while (remaining.length() && lineCount < 3) {
+    int forcedBreak = remaining.indexOf('\n');
+    if (forcedBreak >= 0) {
+      lines[lineCount++] = remaining.substring(0, forcedBreak);
+      remaining = remaining.substring(forcedBreak + 1);
+      continue;
+    }
+
     int split = -1;
     int lastSpace = -1;
     for (int i = 0; i < remaining.length(); ++i) {

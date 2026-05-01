@@ -181,7 +181,7 @@ Comprehensive Menu Reference (All Screens)
   - `CLEAR`
   - `CH:SET` / `CH:ALL`
 - In edit mode on a param slot, send a CC to learn that CC number and channel for that slot.
-- `EYMD` / `PSMD` mapping excludes `CC 1..CC 19`, `CC103`, `LoopRecPlay`, and `LoopStopDel` options.
+- `EYMD` / `PSMD` mapping excludes `CC 1..CC 19`, `CC103`, `Loop Rec/ Play/Over`, and `Loop Stop/ Delete` options.
 - `CLEAR` clears all MAP CC assignments when you exit edit mode on `CLEAR`.
 - `CH:SET`/`CH:ALL` toggles when you exit edit mode on that row:
   - `CH:SET`: mapped CC must match both learned CC and learned channel.
@@ -245,8 +245,8 @@ Comprehensive Menu Reference (All Screens)
   - `NOTES C0..NOTES C7` (2-oct note ranges)
   - `CC 1..CC 19`
   - `CC103`
-  - `LoopRecPlay`
-  - `LoopStopDel`
+  - `Loop Rec/ Play/Over`
+  - `Loop Stop/ Delete`
 - Division overlay modes currently target `DIVISION` only.
 - `DIV3` profile: far zone most-slowing, middle less-slowing, close small zone speed-up.
 - `ARP LATCH`: latch arp notes; wave over sensor to clear latch phrase.
@@ -255,8 +255,8 @@ Comprehensive Menu Reference (All Screens)
 - `ARP FREEZ+`: freeze mode with thru path freeze support as well.
 - `NOTES Cx`: quantized note output with edge padding and range trims.
 - `CC103`: sends a CC 103 pulse.
-- `LoopRecPlay`: if no loop exists, arms loop recording; recording starts on the first note played after the trigger. If a loop exists and is stopped, it starts playback immediately. If a loop is already playing, it toggles overdub on/off.
-- `LoopStopDel`: first trigger stops loop recording/playback; the next distinct trigger deletes the stored loop.
+- `Loop Rec/ Play/Over`: if no loop exists, arms loop recording; recording starts on the first note played after the trigger. If a loop exists and is stopped, it starts playback immediately. If a loop is already playing, it toggles overdub on/off.
+- `Loop Stop/ Delete`: first trigger stops loop recording/playback; the next distinct trigger deletes the stored loop.
 
 22. `PUSH`
 - Same mode list and behavior family as `EYE MODE`.
@@ -266,9 +266,9 @@ Comprehensive Menu Reference (All Screens)
 
 23. `LOOP`
 - Options: `1 BAR`, `2 BAR`, `4 BAR`, `8 BAR`, `FREE`.
-- Sets the note-only loop length used by `LoopRecPlay`.
+- Sets the note-only loop length used by `Loop Rec/ Play/Over`.
 - Fixed bar loops start playback automatically after the selected length is recorded.
-- `FREE` records until `LoopStopDel` stops it.
+- `FREE` records until `Loop Stop/ Delete` stops it.
 - Loop status icon in the upper-right: open circle = armed/recording/overdub, open play triangle = playing, pause bars = loop saved and stopped.
 
 24. `KEY`
