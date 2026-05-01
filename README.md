@@ -156,7 +156,14 @@ Comprehensive Menu Reference (All Screens)
 - Thru path for notes from input channel.
 - If thru channel equals bass channel while bass is enabled, thru is suppressed for that channel.
 
-10. `DIV NOTE`
+10. `RNDRBN`
+- Options: `OFF`, `+1..+15`.
+- Applies only to the arp output channel path.
+- Incoming notes that would output on the arp channel rotate across the arp channel plus the selected number of following channels.
+- Example: `+1` alternates between the arp channel and the next channel.
+- Arp-generated notes use the same rotation; other output channels are unchanged.
+
+11. `DIV NOTE`
 - Cursor options:
   - Division slots: `1/4`, `1/4T`, `1/8`, `1/8T`, `1/16`, `1/16T`, `1/32`, `1/32T`, `1/64`
   - `+NOTE`
@@ -168,13 +175,13 @@ Comprehensive Menu Reference (All Screens)
   - If `+NOTE` has a note value, mapped trigger note is replaced by `+NOTE` and then processed normally.
 - `RESET` clears all division-note mappings and `+NOTE` when you exit edit mode on `RESET`.
 
-11. `MAP CC`
+12. `MAP CC`
 - Cursor options:
   - Param slots: `BPM`, `ARP`, `DIV`, `VEL`, `LEN`, `IN`, `ACH`, `BCH`, `TCH`, `INCC`, `EYCH`, `EYMD`, `PSMD`, `KEY`, `SCL`, `LOAD`
   - `CLEAR`
   - `CH:SET` / `CH:ALL`
 - In edit mode on a param slot, send a CC to learn that CC number and channel for that slot.
-- `EYMD` / `PSMD` mapping excludes `CC 1..CC 19` and `LOOP TRIG` options.
+- `EYMD` / `PSMD` mapping excludes `CC 1..CC 19`, `CC103`, `LoopRecPlay`, and `LoopStopDel` options.
 - `CLEAR` clears all MAP CC assignments when you exit edit mode on `CLEAR`.
 - `CH:SET`/`CH:ALL` toggles when you exit edit mode on that row:
   - `CH:SET`: mapped CC must match both learned CC and learned channel.
@@ -185,12 +192,12 @@ Comprehensive Menu Reference (All Screens)
 - For stepped parameters, incoming CC is thresholded to target steps to avoid jitter.
 - Display jumps to the changed parameter screen after movement settles, to avoid over-refreshing while CC is moving quickly.
 
-12. `IN CC >`
+13. `IN CC >`
 - Options: `CH 1..CH 16`, `ALL3`.
 - Affects routing of input-channel `CC`, `Pitch Bend`, `Program Change`, and `Channel Aftertouch`.
 - `ALL3` fans these messages to arp/thru/bass channel outputs (de-duplicated).
 
-13. `LEGATO`
+14. `LEGATO`
 - Options: `OFF`, `CH 1..CH 16`.
 - Applies to note messages on the selected non-`INPUT CH` lane.
 - Behavior: monophonic last-note priority with explicit handoff:
@@ -198,36 +205,36 @@ Comprehensive Menu Reference (All Screens)
   - releasing that note re-activates the previous still-held note
   - when no held notes remain, output note is released
 
-14. `REMOTE`
+15. `REMOTE`
 - Options: `CH 1..CH 16`.
 - Output channel used by both foot pedal remote actions (`REMOTE 1` and `REMOTE 2`).
 
-15. `REMOTE 1`
+16. `REMOTE 1`
 - Action sent when pedal 1 goes low.
 - Value mapping:
   - `0..127` => note number pulse
   - `128..254` => CC `1..127` pulse
 - Pulse length uses project pedal pulse timing.
 
-16. `REMOTE 2`
+17. `REMOTE 2`
 - Same action model as `REMOTE 1`, for pedal 2.
 
-17. `USB HOST`
+18. `USB HOST`
 - Options: `OFF`, `IN ONLY`, `IN/OUT`.
 - Changing this setting reboots after exiting edit mode so host stack restarts cleanly.
 - `IN/OUT` enables USB host TX fanout as well as input.
 
-18. `SCRNSVR`
+19. `SCRNSVR`
 - Options: `OFF`, `AUTO`, `NOW`.
 - `AUTO`: enters after idle timeout.
 - `NOW`: immediate manual activation (not persisted as always-on).
 - Saver redraws procedurally and refreshes on interval.
 
-19. `EYE/PUSH`
+20. `EYE/PUSH`
 - Options: `CH 1..CH 16`.
 - Shared output channel for both `EYE MODE` and `PUSH` generated notes/cc/pitch/loop messages.
 
-20. `EYE MODE`
+21. `EYE MODE`
 - Modes:
   - `OFF`
   - `DIV +2`, `DIV -2`, `DIV +3`, `DIV -3`, `DIV FULL`, `DIV3`
@@ -237,7 +244,9 @@ Comprehensive Menu Reference (All Screens)
   - `PITCH UP`, `PITCH DOWN`
   - `NOTES C0..NOTES C7` (2-oct note ranges)
   - `CC 1..CC 19`
-  - `LOOP TRIG`
+  - `CC103`
+  - `LoopRecPlay`
+  - `LoopStopDel`
 - Division overlay modes currently target `DIVISION` only.
 - `DIV3` profile: far zone most-slowing, middle less-slowing, close small zone speed-up.
 - `ARP LATCH`: latch arp notes; wave over sensor to clear latch phrase.
@@ -245,15 +254,24 @@ Comprehensive Menu Reference (All Screens)
 - `ARP FREEZE`: wave over sensor to lock notes into frozen arp set.
 - `ARP FREEZ+`: freeze mode with thru path freeze support as well.
 - `NOTES Cx`: quantized note output with edge padding and range trims.
-- `LOOP TRIG`: sends note `103` or `104` pulse based on proximity.
+- `CC103`: sends a CC 103 pulse.
+- `LoopRecPlay`: if no loop exists, arms loop recording; recording starts on the first note played after the trigger. If a loop exists and is stopped, it starts playback immediately. If a loop is already playing, it toggles overdub on/off.
+- `LoopStopDel`: first trigger stops loop recording/playback; the next distinct trigger deletes the stored loop.
 
-21. `PUSH`
+22. `PUSH`
 - Same mode list and behavior family as `EYE MODE`.
 - Input source is analog pressure on pin `26`.
 - Uses calibrated thresholds and curved response so light press is less aggressive.
 - Shares channel with `EYE/PUSH` setting.
 
-22. `KEY`
+23. `LOOP`
+- Options: `1 BAR`, `2 BAR`, `4 BAR`, `8 BAR`, `FREE`.
+- Sets the note-only loop length used by `LoopRecPlay`.
+- Fixed bar loops start playback automatically after the selected length is recorded.
+- `FREE` records until `LoopStopDel` stops it.
+- Loop status icon in the upper-right: open circle = armed/recording/overdub, open play triangle = playing, pause bars = loop saved and stopped.
+
+24. `KEY`
 	**WARNING while on key/guitar screens like this, rapid notes will slow the arp due to refreshing the display**
 - Options:
   - `OFF`
@@ -261,7 +279,7 @@ Comprehensive Menu Reference (All Screens)
   - alternate white-key mapper roots: `CKEY C..CKEY B`
 - `CKEY` engages white-key-to-scale-position mapping.
 
-23. `SCALE`
+25. `SCALE`
 - Options:
   - `OFF`
   - `MAJOR`
@@ -274,22 +292,22 @@ Comprehensive Menu Reference (All Screens)
 - `MEL MIN`
 - In `CKEY` mode, combo scales are skipped (`MAJ+MIN`, `BLUES+BOTH`).
 
-24. `GIT/KEYS`
+26. `GIT/KEYS`
 - Options: `GUITAR`, `PIANO`.
 - Chooses visualization style for key/scale pages.
 - Saved in preset and restored on boot/load.
 
-25. `LOAD`
+27. `LOAD`
 - Select preset slot `1..16` in edit mode.
 - Preset is actually loaded when you click back to select mode.
 - Grid view shows slot location.
 
-26. `SAVE`
+28. `SAVE`
 - Select destination slot `1..16` in edit mode.
 - Slot is written when you click back to select mode.
 - Grid view shows slot location.
 
-27. `PANIC`
+29. `PANIC`
 - Top screen in this page is USB overload debug:
 	**WARNING if you stay on this screen, rapid notes will slow the arp due to refreshing the display**
   - device counts
