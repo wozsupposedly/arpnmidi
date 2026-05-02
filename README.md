@@ -1,20 +1,20 @@
 ARPnMIDI
 ========
-
-****RP2040 Zero MIDI router / arpeggiator / processor / multitool.****
+****RP2040 Zero MIDI router / arpeggiator / looper / expression / key finder / multitool / and more!****
+By Joseph Wozniak - https://woz.lol
 
 with SSD1306 OLED display (2-color recommended, yellow on the bottom)
 
-Connect multiple usb midi devices with a hub. Output din/trs or usb midi.
+****Connect multiple usb midi devices with a hub. Output din/trs or usb midi.****
 
-Control live parameters and the appegiator with:
+**Control live parameters and the appegiator with:**
+* Optical distance sensor (VL53L0X)
+* Push force pressure sensor (FSR402 sensor with LM393 module)
+* Assignable CC controls
+* 4 foot pedal inputs (optionally connected to a QIACHIP RX480E wireless module)
 
-* optical distance sensor (VL53L0X)
-* push force pressure sensor (FSR402 sensor with LM393 module)
-
-You can also add a Promicro board as a usb midi device, for full usb-to-usb rounting to another usb host. use this file for the promicro: promicro_usb_din_midi_bridge.txt
-
-This repo keeps the main sketch as `arpnmidi.txt` (not `.ino`) so you can paste it into Arduino IDE without changing board profile/project behavior.
+You can also add an additional RP2040 board as a usb midi device, for full usb-to-usb rounting to another usb host.
+Use this file for the secondary RP2040: rp2040_usb_din_midi_bridge.txt
 
 Current Hardware Pin Map (RP2040 Zero board labels)
 ---------------------------------------------------
@@ -30,11 +30,24 @@ Use the pin numbers exactly as printed on the RP2040 Zero board:
 - `8` Rotary encoder push switch
 - `9` Foot pedal 1 input (active low, uses pull-up)
 - `10` Foot pedal 2 input (active low, uses pull-up)
+- `12` Foot pedal 3 input (active low, uses pull-up)
+- `13` Foot pedal 4 input (active low, uses pull-up)
 - `14` USB host D+
 - `15` USB host D-
 - `26` Push/pressure analog sensor input (FSR402 sensor with LM393 module)
 
 Pin `11` is intentionally unused, so we can put a screw there.
+
+ *   RP2040 / Arduino-Pico pin settings:                                   *
+ *     - USB MIDI host D+ to 22ohm resistor to GPIO pin 14                 *
+ *     - USB MIDI host D- to 22ohm resistor to GPIO pin 15                 *
+ *     - The 22ohm resistors go near the RP2040.                           * 
+ *     - USB MIDI host port requires 5V VBUS power, and two 15k resistors  *
+ *     one from D+ to ground, and another from D- to ground.               * 
+ *                                                                         *
+ *     -IMPORTANT set CPU Speed: "240 MHz (Overclock)"                     *
+ *     -NOTE use a ground wire to the usb host thicker than 30awg.         *
+ *     -Twist D+ and D-, try to keep them short.                           *
 
 Build Notes
 -----------
